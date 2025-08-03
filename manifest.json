@@ -1,0 +1,14 @@
+{
+  "name": "Ice Escape",
+  "build_time": "2025-08-03T14:31:44.293Z",
+  "assets": [],
+  "initial_pages": 64,
+  "display": "fullscreen",
+  "icons": [
+    {
+      "src": "icon.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ] 
+}
