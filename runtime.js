@@ -133,7 +133,28 @@ const entry_point = () => {
 };
 
 let pwa_manifest;
+let websocket;
+
+let web_buffer = new Uint8Array(1024*1024*32);
+let web_buffer_cursor = 0;
+
 window.addEventListener("load", async () => {
+    websocket = new WebSocket("ws://89.88.83.151:2356/ws");
+    websocket.addEventListener("message", async event => {
+        // Append event.data to web_buffer at web_buffer_cursor
+        const blob = event.data;
+        const buffer = await blob.arrayBuffer();
+        const data = new Uint8Array(buffer);
+        // const data = new Uint8Array(await event.data.arrayBuffer());
+        if (web_buffer_cursor + data.length > web_buffer.length) {
+            console.error("Web buffer overflow, dropping message");
+            return;
+        }
+
+        web_buffer.set(data, web_buffer_cursor);
+        web_buffer_cursor += data.length;
+    });
+
     // remove any existing workers associated with this page in case it is from an older version
     const registrations = await navigator.serviceWorker.getRegistrations();
     for (let it_index = 0; it_index < registrations.length; it_index++) {
@@ -255,6 +276,18 @@ jai_imports.js_set_working_directory = (path_count, path_data, path_is_constant)
         return false;
     }
     }
+};
+
+const copy_array_to_js = (count, data) => {
+    const u8 = new Uint8Array(jai_exports.memory.buffer)
+    const bytes = u8.subarray(Number(data), Number(data) + Number(count));
+    return bytes;
+}
+jai_imports.js_send_web_message = (data, length) => {
+    if (websocket.readyState != WebSocket.OPEN)
+        return;
+    const x = copy_array_to_js(length, data);
+    websocket.send(x);
 };
 
 
@@ -825,7 +858,19 @@ const write_to_console_log = (str, to_standard_error) => {
     }
 }
 
+jai_imports.js_get_web_message_received = (data, count, recv_ptr) => {
+    const dest = new Uint8Array(jai_exports.memory.buffer, Number(data), Number(count));
 
+    dest.set(web_buffer);
+
+    // Interpret recv_ptr as a s64 pointer to jai_exports.memory
+    const view = new DataView(jai_exports.memory.buffer);
+    const recv_address = Number(recv_ptr);
+
+    view.setBigInt64(recv_address, BigInt(web_buffer_cursor), true);
+
+    web_buffer_cursor = 0;
+};
 
 
 /*
@@ -892,6 +937,7 @@ jai_imports.glDisable = (cap) => { gl.disable(cap); };
 jai_imports.glUseProgram = (program) => { gl.useProgram(gl_id2obj(program)); };
 jai_imports.glUniformBlockBinding = (program, index, binding) => { gl.uniformBlockBinding(gl_id2obj(program), index, binding); };
 jai_imports.glUniform1i = (loc, v) => { gl.uniform1i(gl_id2obj(loc), v); };
+jai_imports.glUniform3f = (loc, x, y, z) => { gl.uniform3f(gl_id2obj(loc), x, y, z); };
 jai_imports.glEnableVertexAttribArray = (index) => { gl.enableVertexAttribArray(index); };
 jai_imports.glVertexAttribPointer = (index, size, typ, norm, stride, p) => { gl.vertexAttribPointer(index, size, typ, norm, stride, Number(p)); };
 jai_imports.glVertexAttribIPointer = (index, size, typ, stride, offset) => { gl.vertexAttribIPointer(index, size, typ, stride, Number(offset)); };
