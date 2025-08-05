@@ -139,7 +139,7 @@ let web_buffer = new Uint8Array(1024*1024*32);
 let web_buffer_cursor = 0;
 
 window.addEventListener("load", async () => {
-    websocket = new WebSocket("ws://89.88.83.151:2356/ws");
+    websocket = new WebSocket("wss://89.88.83.151:2356/ws");
     websocket.addEventListener("message", async event => {
         // Append event.data to web_buffer at web_buffer_cursor
         const blob = event.data;
@@ -689,7 +689,10 @@ const opfs_absolute_path_to_parent_and_name = async (absolute, create_parents) =
 const opfs_ensure_path_exists = async (path, is_directory) => {
     const absolute = opfs_get_absolute_path(path);
     const { ok, parent, file_name } = await opfs_absolute_path_to_parent_and_name(absolute, true);
-    if (!ok) throw new Error("unreachable");
+    if (!ok) {
+        return 
+        // throw new Error("unreachable");
+    }
     
     let handle;
     if (is_directory) {
