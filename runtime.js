@@ -155,36 +155,38 @@ window.addEventListener("load", async () => {
         web_buffer_cursor += data.length;
     });
 
-    // remove any existing workers associated with this page in case it is from an older version
-    const registrations = await navigator.serviceWorker.getRegistrations();
-    for (let it_index = 0; it_index < registrations.length; it_index++) {
-        const it = registrations[it_index];
-        if (it.scope === document.location.href) await it.unregister();
-    }
-    const registration = await navigator.serviceWorker.register("./worker.js");
-    
-    // Ideally there would be some way to say to ensure we have the most recent web worker is installed before we load the
-    // application, but that is not possible because web :(. The best you can do is just reload the page if the service
-    // worker is updated, so your application will start for a second and then the page will reload and then the
-    // updated application will start. This is really lame and I am still looking for a better alternative.
-    // -nzizic, 16 June 2025
-    
-    // taken from https://codyanhorn.tech/blog/pwa-reload-page-on-application-update
-    let sw_updated   = false;
-    let sw_activated = false;
-    registration.addEventListener("updatefound", () => {
-        const worker = registration.installing;
-        worker.addEventListener("statechange", () => {
-            if (worker.state === "activated") {
-                sw_activated = true;
-                if (sw_activated && sw_updated) window.location.reload();
-            }
+    if (navigator.serviceWorker) {
+        // remove any existing workers associated with this page in case it is from an older version
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        for (let it_index = 0; it_index < registrations.length; it_index++) {
+            const it = registrations[it_index];
+            if (it.scope === document.location.href) await it.unregister();
+        }
+        const registration = await navigator.serviceWorker.register("./worker.js");
+        
+        // Ideally there would be some way to say to ensure we have the most recent web worker is installed before we load the
+        // application, but that is not possible because web :(. The best you can do is just reload the page if the service
+        // worker is updated, so your application will start for a second and then the page will reload and then the
+        // updated application will start. This is really lame and I am still looking for a better alternative.
+        // -nzizic, 16 June 2025
+        
+        // taken from https://codyanhorn.tech/blog/pwa-reload-page-on-application-update
+        let sw_updated   = false;
+        let sw_activated = false;
+        registration.addEventListener("updatefound", () => {
+            const worker = registration.installing;
+            worker.addEventListener("statechange", () => {
+                if (worker.state === "activated") {
+                    sw_activated = true;
+                    if (sw_activated && sw_updated) window.location.reload();
+                }
+            });
         });
-    });
-    navigator.serviceWorker.addEventListener("controllerchange", () => {
-        sw_updated = true;
-        if (sw_activated && sw_updated) window.location.reload();
-    });
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+            sw_updated = true;
+            if (sw_activated && sw_updated) window.location.reload();
+        });
+    }
     
     
     // We use the PWA manifest to store paths to cached assets in addition to metadata about the application
