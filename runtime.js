@@ -643,37 +643,44 @@ const opfs_get_absolute_path = (path) => {
 
 // returns a opfs handle or undefined if it could not be found
 const opfs_absolute_path_to_parent_and_name = async (absolute, create_parents) => {
-    const root    = await navigator.storage.getDirectory();
-    const folders = [];
-    const parts   = absolute.split('/').filter(part => part);
-    
-    for (let it_index = 0; it_index <= parts.length-2; it_index++) {
-        const it = parts[it_index];
-        if (it === ".") {
-            continue;
-        } else if (it === "..") {
-            folders.pop();
-            continue;
-        } else {
-            const parent = folders[folders.length-1] ?? root;
-            try {
-                const next = await parent.getDirectoryHandle(it, { create: create_parents });
-                folders.push(next);
-            } catch (e) {
-                if (e.name !== "NotFoundError") throw e; // uggg
-                return {
-                    ok: false,
-                    parent: undefined,
-                    file_name: undefined,
-                };
+    if (navigator.storage) {
+        const root    = await navigator.storage.getDirectory();
+        const folders = [];
+        const parts   = absolute.split('/').filter(part => part);
+        
+        for (let it_index = 0; it_index <= parts.length-2; it_index++) {
+            const it = parts[it_index];
+            if (it === ".") {
+                continue;
+            } else if (it === "..") {
+                folders.pop();
+                continue;
+            } else {
+                const parent = folders[folders.length-1] ?? root;
+                try {
+                    const next = await parent.getDirectoryHandle(it, { create: create_parents });
+                    folders.push(next);
+                } catch (e) {
+                    if (e.name !== "NotFoundError") throw e; // uggg
+                    return {
+                        ok: false,
+                        parent: undefined,
+                        file_name: undefined,
+                    };
+                }
             }
         }
+        
+        return {
+            ok: true,
+            parent: folders.pop() ?? root,
+            file_name: parts[parts.length-1],
+        }
     }
-    
-    return {
-        ok: true,
-        parent: folders.pop() ?? root,
-        file_name: parts[parts.length-1],
+    else {
+        return {
+            ok: false
+        }
     }
     
 };
