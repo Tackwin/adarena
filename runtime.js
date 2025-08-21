@@ -850,6 +850,18 @@ jai_imports.js_get_web_message_received = (data, count, recv_ptr) => {
     web_buffer_cursor = 0;
 };
 
+jai_imports.js_get_token = () => {
+    if (sessionStorage.getItem("token")) {
+        return parseInt(sessionStorage.getItem("token"), 10);
+    }
+    return Math.random() * 1024 * 1024;
+}
+
+jai_imports.js_set_token = (token) => {
+    sessionStorage.setItem("token", token);
+};
+
+
 
 /*
 
@@ -1081,6 +1093,181 @@ const gl_get_size_from_type = (type) => {
     }
 };
 
+
+
+/*
+
+Module Sound_Player platform layer inserted from C:/Users/Tackwin/Documents/Code/jai/modules/Toolchains/Web/libjs/Sound_Player.js
+
+*/
+
+let audio_context  = null;
+let audio_node     = null;
+let buffered_bytes = 0;
+let sound_player_is_initted     = false;
+
+// You can't make me put this in another file!
+const audio_processor_url = URL.createObjectURL(new Blob([`
+class JaiSoundPlayerAudioProcessor extends AudioWorkletProcessor {
+    constructor(opts) {
+        super();
+        this.numChannels = opts.processorOptions.numChannels;
+        this.queue = [];
+        this.queueBytes = 0;
+        this.curr = null;
+        this.offset = 0;
+    
+        this.port.onmessage = (e) => {
+            if (e.data.chunk) {
+                const chunk = new Uint8Array(e.data.chunk);
+                this.queue.push(chunk);
+                this.queueBytes += chunk.byteLength;
+            }
+        };
+        
+        // console.log("constructed processor", this);
+    }
+    
+    process(_inputs, outputs) {
+        if (this.numChannels === 0) return true;
+    
+        const out = outputs[0];
+        const frames = out[0].length;
+    
+        // silence all channels first
+        for (let c = 0; c < out.length; c++) {
+            out[c].fill(0);
+        }
+    
+        for (let i = 0; i < frames; i++) {
+            for (let c = 0; c < this.numChannels; c++) {
+                out[c][i] = this._readSample();
+            }
+        }
+    
+        // report back how many bytes remain
+        this.port.postMessage({ queuedBytes: this.queueBytes });
+        
+        // console.log("processed audio", _inputs, outputs);
+        return true;
+    }
+    
+    _readSample() {
+        // each sample is 2 bytes (PCM_I16 little-endian)
+        if (!this.curr || this.offset + 1 >= this.curr.length) {
+            if (this.queue.length > 0) {
+                this.curr = this.queue.shift();
+                this.offset = 0;
+            } else {
+                return 0; // underrun -> silence
+            }
+        }
+        const lo = this.curr[this.offset];
+        const hi = this.curr[this.offset + 1];
+        this.offset += 2;
+        this.queueBytes -= 2;
+    
+        // combine & sign-extend
+        let s = (hi << 8) | lo;
+        s = (s << 16) >> 16;
+        return s / 32768;
+    }
+}
+
+registerProcessor("jai-sound-player-audio-processor", JaiSoundPlayerAudioProcessor);
+`], { type: 'application/javascript' }));
+
+
+// We need to keep trying to resume the audio context since nothing can play until the user interacts with the page. Sad...
+for (let event of ["click","keydown","mousedown","pointerdown","pointerup","touchstart", "touchend"]) {
+    document.addEventListener(event, () => {
+        const need_resume = audio_context && audio_context.state !== "running";
+        console.log("got event for", event, need_resume);
+        if (sound_player_is_initted && need_resume) audio_context.resume();
+    });
+}
+
+jai_imports.js_audio_init = (num_channels, sample_rate, buffer_size_in_frames) => {
+    switch (wasm_pause()) {
+    case 0: (async () => {
+        const numChannels = Number(num_channels);
+        const rate = Number(sample_rate);
+    
+        if (audio_context) {
+            set_resume_error("js_audio_init was already called");
+            return -1;
+        }
+        
+        audio_context = new AudioContext({ sampleRate: rate });
+        
+        // console.log("init context", audio_context);
+        try {
+            await audio_context.audioWorklet.addModule(audio_processor_url);
+            audio_node = new AudioWorkletNode(audio_context, "jai-sound-player-audio-processor",
+                {
+                    numberOfOutputs: 1,
+                    outputChannelCount: [numChannels],
+                    processorOptions: {numChannels},
+                }
+            );
+            audio_node.connect(audio_context.destination);
+            // console.log("init node", audio_node);
+    
+            audio_node.port.onmessage = (e) => {
+                if (e.data.queuedBytes != null) {
+                    buffered_bytes = e.data.queuedBytes;
+                }
+            };
+            
+            audio_context.resume(); // do NOT await here.
+            sound_player_is_initted = true;
+            return +1;
+        } catch (e) {
+            audio_context = null;
+            set_resume_error(`js_audio_init could not add audio processor (${e.name}) ${e.message}`);
+            return -1;
+        }
+    })().then(wasm_resume); return;
+    case -1: log_resume_error(); return false;
+    case +1: return true;
+    }  
+};
+
+jai_imports.js_audio_is_initted = () => { return sound_player_is_initted; };
+jai_imports.js_audio_is_playing = () => { return audio_context && audio_context.state === "running"; };
+
+jai_imports.js_audio_shutdown = () => {
+    sound_player_is_initted = false;
+
+    if (audio_node) {
+        audio_node.disconnect();
+        audio_node = null;
+    }
+    if (audio_context) {
+        audio_context.close();
+        audio_context = null;
+    }
+    buffered_bytes = 0;
+};
+
+jai_imports.js_count_buffered_bytes = () => {
+    return buffered_bytes;
+};
+
+jai_imports.js_buffer_bytes = (byte_count, buffer_ptr) => {
+    if (!sound_player_is_initted)  return 0; // cannot buffer bytes
+    if (!audio_context && audio_context.state === "running")  return 0; // should not buffer bytes
+
+    const cnt = Number(byte_count);
+    const ptr = Number(buffer_ptr);
+
+    const heap = new Uint8Array(jai_exports.memory.buffer, ptr, cnt);
+    const copy = heap.slice();
+    // send to worklet
+    audio_node.port.postMessage({ chunk: copy }, [copy.buffer]);
+
+    return cnt;
+};
 
 
 /*
