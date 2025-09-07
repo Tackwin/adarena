@@ -873,7 +873,9 @@ let front_canvas = undefined;
 const back_canvas = new OffscreenCanvas(0, 0);
 const gl = back_canvas.getContext("webgl2");
 if (!gl ||
-    !gl.getExtension("EXT_texture_filter_anisotropic")
+    !gl.getExtension("EXT_texture_filter_anisotropic") ||
+    !gl.getExtension("EXT_color_buffer_float") ||
+    false
 ) throw new Error("Browser does not support WebGL!");
 
 const gl_handles = []; // this stores both shader components and programs
@@ -927,6 +929,7 @@ jai_imports.glDisable = (cap) => { gl.disable(cap); };
 jai_imports.glUseProgram = (program) => { gl.useProgram(gl_id2obj(program)); };
 jai_imports.glUniformBlockBinding = (program, index, binding) => { gl.uniformBlockBinding(gl_id2obj(program), index, binding); };
 jai_imports.glUniform1i = (loc, v) => { gl.uniform1i(gl_id2obj(loc), v); };
+jai_imports.glUniform1f = (loc, x) => { gl.uniform1f(gl_id2obj(loc), x); };
 jai_imports.glUniform2f = (loc, x, y) => { gl.uniform2f(gl_id2obj(loc), x, y); };
 jai_imports.glUniform3f = (loc, x, y, z) => { gl.uniform3f(gl_id2obj(loc), x, y, z); };
 jai_imports.glEnableVertexAttribArray = (index) => { gl.enableVertexAttribArray(index); };
@@ -958,6 +961,8 @@ jai_imports.glGetUniformLocation = (program, name_count, name_data, name_is_cons
     const prog   = gl_id2obj(program);
     const name   = copy_string_to_js(name_count, name_data, name_is_constant);
     const loc    = gl.getUniformLocation(prog, name);
+    if (loc === null)
+        return -1;
     const result = gl_obj2id(loc);
     return result;
 };
@@ -987,6 +992,29 @@ jai_imports.glGenFramebuffers = (n, buffers) => {
         const handle = gl_obj2id(gl.createFramebuffer());
         view.setUint32(Number(buffers) + i * 4, handle, true);
     }
+};
+jai_imports.glFramebufferTexture2D = (target, attachment, textarget, texture, level) => {
+    gl.framebufferTexture2D(target, attachment, textarget, gl_id2obj(texture), level);
+};
+
+jai_imports.glGenRenderbuffers = (n, buffers) => {
+    const view = new DataView(jai_exports.memory.buffer);
+    for (let i = 0; i < n; i++) {
+        const handle = gl_obj2id(gl.createRenderbuffer());
+        view.setUint32(Number(buffers) + i * 4, handle, true);
+    }
+};
+
+jai_imports.glBindRenderbuffer = (target, renderbuffer) => {
+    gl.bindRenderbuffer(target, gl_id2obj(renderbuffer));
+};
+
+jai_imports.glRenderbufferStorage = (target, internalformat, width, height) => {
+    gl.renderbufferStorage(target, internalformat, width, height);
+};
+
+jai_imports.glFramebufferRenderbuffer = (target, attachment, renderbuffertarget, renderbuffer) => {
+    gl.framebufferRenderbuffer(target, attachment, renderbuffertarget, gl_id2obj(renderbuffer));
 };
 
 jai_imports.glGenBuffers = (n, buffers) => {
@@ -1040,7 +1068,11 @@ jai_imports.glGetShaderInfoLog = (_shader, length_ptr, data_ptr) => {
     // throw `TODO: copy string and print \n\n${info}`;
 };
 
-
+jai_imports.glGetProgramInfoLog = (_program, length_ptr, data_ptr) => {
+    const program = gl_id2obj(_program);
+    const info = gl.getProgramInfoLog(program);
+    // throw `TODO: copy string and print \n\n${info}`;
+};
 
 jai_imports.glGetUniformBlockIndex = (program, name_count, name_data, name_is_constant) => {
     const prog = gl_id2obj(program);
@@ -1057,8 +1089,15 @@ jai_imports.glUniformMatrix4fv = (_location, count, transpose, value_ptr) => {
 jai_imports.glTexImage2D = (target, level, internal_format, width, height, border, format, typ, pixels) => {
     const components   = gl_get_components_from_format(internal_format);
     const element_size = gl_get_size_from_type(typ);
-    const data = new Uint8Array(jai_exports.memory.buffer, Number(pixels), width*height*components*element_size);
-    gl.texImage2D(target, level, internal_format, width, height, border, format, typ, data);
+    if (typ == gl.FLOAT) {
+        const data = new Float32Array(
+            jai_exports.memory.buffer, Number(pixels), width*height*components
+        );
+        gl.texImage2D(target, level, internal_format, width, height, border, format, typ, data);
+    } else {
+        const data = new Uint8Array(jai_exports.memory.buffer, Number(pixels), width*height*components*element_size);
+        gl.texImage2D(target, level, internal_format, width, height, border, format, typ, data);
+    }
 };
 
 jai_imports.glReadPixels = (x, y, width, height, format, type, offset) => {
@@ -1082,6 +1121,10 @@ const gl_get_components_from_format = (format) => {
     switch (format) {
     case gl.RGB8:  return 3;
     case gl.RGBA8: return 4;
+    case gl.RGB32F: return 3;
+    case gl.RGBA32F: return 4;
+    case gl.DEPTH_COMPONENT: return 1;
+    case gl.DEPTH_COMPONENT32F: return 1;
     default: throw `TODO: Unsupported texture glformat ${format}`
     }
 };
@@ -1089,6 +1132,8 @@ const gl_get_components_from_format = (format) => {
 const gl_get_size_from_type = (type) => {
     switch (type) {
     case gl.UNSIGNED_BYTE: return 1;
+    case gl.FLOAT: return 4;
+    case gl.DEPTH_COMPONENT: return 4;
     default: throw `TODO: Unsupported gl element type ${type}`;
     }
 };
@@ -1770,3 +1815,638 @@ jai_imports.js_toggle_fullscreen = (window, desire_fullscreen, out_width, out_he
     case -1: log_resume_error(); return false;
     }
 };
+let object_map = [];
+let buffer_to_pointer_map = [];
+let object_map_counter = 0;
+
+const WGPUStatus_SUCCESS = 1;
+const WGPUStatus_ERROR = 2;
+
+const getU64 = (ptr, offset) => {
+	const view = new DataView(jai_exports.memory.buffer);
+	return view.getBigUint64(Number(ptr) + Number(offset), true);
+}
+
+const setU32 = (ptr, offset, value) => {
+	const view = new DataView(jai_exports.memory.buffer);
+	view.setUint32(Number(ptr) + Number(offset), Number(value), true);
+}
+const setU64 = (ptr, offset, value) => {
+	const view = new DataView(jai_exports.memory.buffer);
+	view.setBigUint64(Number(ptr) + Number(offset), BigInt(value), true);
+}
+
+const getString = (stringview_ptr) => {
+	const data = getU64(stringview_ptr, 0);
+	const length = getU64(stringview_ptr, 8);
+	return new TextDecoder().decode(
+		new Uint8Array(jai_exports.memory.buffer, Number(data), Number(length))
+	);
+}
+
+jai_imports.jsCreateInstance = (params_ptr, returns_ptr) => {
+	object_map_counter += 1;
+	object_map[object_map_counter] = navigator.gpu;
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsInstanceRequestAdapter = (params_ptr, returns_ptr) => {
+	switch(wasm_pause()) {
+		case 0: (async () => {
+			const adapter = await navigator.gpu.requestAdapter();
+
+			object_map_counter += 1;
+			object_map[object_map_counter] = adapter;
+			setU64(returns_ptr, 0, object_map_counter);
+			return +1;
+		})().then(wasm_resume); break;
+	}
+}
+
+jai_imports.jsAdapterGetLimits = (params_ptr, returns_ptr) => {
+	const adapter_idx = getU64(params_ptr, 0);
+	if (adapter_idx <= 0) {
+		setU32(returns_ptr, 0, WGPUStatus_ERROR);
+		return;
+	}
+
+	const adapter = object_map[adapter_idx];
+
+	const limits_ptr = getU64(params_ptr, 8);
+
+	setU32(limits_ptr, 8 + 0, adapter.limits.maxTextureDimension1D);
+	setU32(limits_ptr, 8 + 4, adapter.limits.maxTextureDimension2D);
+	setU32(limits_ptr, 8 + 8, adapter.limits.maxTextureDimension3D);
+	setU32(limits_ptr, 8 + 12, adapter.limits.maxTextureArrayLayers);
+	setU32(limits_ptr, 8 + 16, adapter.limits.maxBindGroups);
+	setU32(limits_ptr, 8 + 20, adapter.limits.maxBindGroupsPlusVertexBuffers);
+	setU32(limits_ptr, 8 + 24, adapter.limits.maxBindingsPerBindGroup);
+	setU32(limits_ptr, 8 + 28, adapter.limits.maxDynamicUniformBuffersPerPipelineLayout);
+	setU32(limits_ptr, 8 + 32, adapter.limits.maxDynamicStorageBuffersPerPipelineLayout);
+	setU32(limits_ptr, 8 + 36, adapter.limits.maxSampledTexturesPerShaderStage);
+	setU32(limits_ptr, 8 + 40, adapter.limits.maxSamplersPerShaderStage);
+	setU32(limits_ptr, 8 + 44, adapter.limits.maxStorageBuffersPerShaderStage);
+	setU32(limits_ptr, 8 + 48, adapter.limits.maxStorageTexturesPerShaderStage);
+	setU32(limits_ptr, 8 + 52, adapter.limits.maxUniformBuffersPerShaderStage);
+	setU32(limits_ptr, 8 + 56, adapter.limits.maxUniformBufferBindingSize);
+	setU32(limits_ptr, 8 + 60, adapter.limits.maxStorageBufferBindingSize);
+	setU32(limits_ptr, 8 + 64, adapter.limits.minUniformBufferOffsetAlignment);
+	setU32(limits_ptr, 8 + 68, adapter.limits.minStorageBufferOffsetAlignment);
+	setU32(limits_ptr, 8 + 72, adapter.limits.maxVertexBuffers);
+	setU32(limits_ptr, 8 + 76, adapter.limits.maxBufferSize);
+	setU32(limits_ptr, 8 + 80, adapter.limits.maxVertexAttributes);
+	setU32(limits_ptr, 8 + 84, adapter.limits.maxVertexBufferArrayStride);
+	setU32(limits_ptr, 8 + 88, adapter.limits.maxInterStageShaderVariables);
+	setU32(limits_ptr, 8 + 92, adapter.limits.maxColorAttachments);
+	setU32(limits_ptr, 8 + 96, adapter.limits.maxColorAttachmentBytesPerSample);
+	setU32(limits_ptr, 8 + 100, adapter.limits.maxComputeWorkgroupStorageSize);
+	setU32(limits_ptr, 8 + 104, adapter.limits.maxComputeInvocationsPerWorkgroup);
+	setU32(limits_ptr, 8 + 108, adapter.limits.maxComputeWorkgroupSizeX);
+	setU32(limits_ptr, 8 + 112, adapter.limits.maxComputeWorkgroupSizeY);
+	setU32(limits_ptr, 8 + 116, adapter.limits.maxComputeWorkgroupSizeZ);
+	setU32(limits_ptr, 8 + 120, adapter.limits.maxComputeWorkgroupsPerDimension);
+
+	setU32(returns_ptr, 0, WGPUStatus_SUCCESS);
+}
+
+
+const FEATURE_Undefined                      = 0;
+const FEATURE_DepthClipControl               = 1;
+const FEATURE_Depth32FloatStencil8           = 2;
+const FEATURE_TimestampQuery                 = 3;
+const FEATURE_TextureCompressionBC           = 4;
+const FEATURE_TextureCompressionBCSliced3D   = 5;
+const FEATURE_TextureCompressionETC2         = 6;
+const FEATURE_TextureCompressionASTC         = 7;
+const FEATURE_TextureCompressionASTCSliced3D = 8;
+const FEATURE_IndirectFirstInstance          = 9;
+const FEATURE_ShaderF16                      = 10;
+const FEATURE_RG11B10UfloatRenderable        = 11;
+const FEATURE_BGRA8UnormStorage              = 12;
+const FEATURE_Float32Filterable              = 13;
+const FEATURE_Float32Blendable               = 14;
+const FEATURE_ClipDistances                  = 15;
+const FEATURE_DualSourceBlending             = 16;
+
+const feature_name_to_enum = (name) => {
+	if (name == "depth-clip-control")
+		return FEATURE_DepthClipControl;
+	if (name == "depth32float-stencil8")
+		return FEATURE_Depth32FloatStencil8;
+	if (name == "timestamp-query")
+		return FEATURE_TimestampQuery;
+	if (name == "texture-compression-bc")
+		return FEATURE_TextureCompressionBC;
+	if (name == "texture-compression-bcsliced3d")
+		return FEATURE_TextureCompressionBCSliced3D;
+	if (name == "texture-compression-etc2")
+		return FEATURE_TextureCompressionETC2;
+	if (name == "texture-compression-astc")
+		return FEATURE_TextureCompressionASTC;
+	if (name == "texture-compression-astcsliced3d")
+		return FEATURE_TextureCompressionASTCSliced3D;
+	if (name == "indirect-first-instance")
+		return FEATURE_IndirectFirstInstance;
+	if (name == "shader-f16")
+		return FEATURE_ShaderF16;
+	if (name == "rg11b10ufloat-renderable")
+		return FEATURE_RG11B10UfloatRenderable;
+	if (name == "bgra8unorm-storage")
+		return FEATURE_BGRA8UnormStorage;
+	if (name == "float32-filterable")
+		return FEATURE_Float32Filterable;
+	if (name == "float32-blendable")
+		return FEATURE_Float32Blendable;
+	if (name == "clip-distances")
+		return FEATURE_ClipDistances;
+	if (name == "dual-source-blending")
+		return FEATURE_DualSourceBlending;
+	return -1;
+}
+const feature_enum_to_name = (e) => {
+	if (e == FEATURE_DepthClipControl)
+		return "depth-clip-control";
+	if (e == FEATURE_Depth32FloatStencil8)
+		return "depth32float-stencil8";
+	if (e == FEATURE_TimestampQuery)
+		return "timestamp-query";
+	if (e == FEATURE_TextureCompressionBC)
+		return "texture-compression-bc";
+	if (e == FEATURE_TextureCompressionBCSliced3D)
+		return "texture-compression-bcsliced3d";
+	if (e == FEATURE_TextureCompressionETC2)
+		return "texture-compression-etc2";
+	if (e == FEATURE_TextureCompressionASTC)
+		return "texture-compression-astc";
+	if (e == FEATURE_TextureCompressionASTCSliced3D)
+		return "texture-compression-astcsliced3d";
+	if (e == FEATURE_IndirectFirstInstance)
+		return "indirect-first-instance";
+	if (e == FEATURE_ShaderF16)
+		return "shader-f16";
+	if (e == FEATURE_RG11B10UfloatRenderable)
+		return "rg11b10ufloat-renderable";
+	if (e == FEATURE_BGRA8UnormStorage)
+		return "bgra8unorm-storage";
+	if (e == FEATURE_Float32Filterable)
+		return "float32-filterable";
+	if (e == FEATURE_Float32Blendable)
+		return "float32-blendable";
+	if (e == FEATURE_ClipDistances)
+		return "clip-distances";
+	if (e == FEATURE_DualSourceBlending)
+		return "dual-source-blending";
+	return "";
+}
+
+jai_imports.jsAdapterGetFeatures = (params_ptr, returns_ptr) => {
+	const adapter_idx = getU64(params_ptr, 0);
+	if (adapter_idx <= 0) {
+		setU32(returns_ptr, 0, WGPUStatus_ERROR);
+		return;
+	}
+
+	const adapter = object_map[adapter_idx];
+	const n = adapter.features.size;
+
+	const memory = jai_exports.context_alloc(jai_context, BigInt(n * 4));
+
+	const features_ptr = getU64(params_ptr, 8);
+	setU64(features_ptr, 8, memory);
+	let cursor = 0;
+	for (const feature of adapter.features) {
+		const idx = feature_name_to_enum(feature);
+		if (idx < 0)
+			continue;
+		setU32(memory, cursor, idx);
+		cursor += 4;
+	}
+	setU64(features_ptr, 0, cursor / 4);
+}
+
+jai_imports.jsSupportedFeaturesFreeMembers = (params_ptr, returns_ptr) => {
+	const features_ptr = getU64(params_ptr, 0);
+	if (features_ptr === 0)
+		return;
+
+	const n = getU64(features_ptr, 0);
+	const memory = getU64(features_ptr, 8);
+
+	jai_exports.context_free(jai_context, memory);
+}
+
+jai_imports.jsAdapterRelease = (params_ptr, returns_ptr) => {
+	const adapter_idx = getU64(params_ptr, 0);
+	if (adapter_idx <= 0) {
+		return;
+	}
+
+	const adapter = object_map[adapter_idx];
+	if (!adapter) {
+		return;
+	}
+
+	// Release the adapter
+	object_map[adapter_idx] = null;
+}
+
+jai_imports.jsAdapterRequestDevice = (params_ptr, returns_ptr) => {
+	const adapter_idx = getU64(params_ptr, 0);
+	const descriptor_ptr = getU64(params_ptr, 8);
+	if (adapter_idx === 0 || descriptor_ptr === 0) {
+		return;
+	}
+	const adapter = object_map[adapter_idx];
+
+	const feature_count = getU64(descriptor_ptr, 8 + 16);
+	const feature_ptr   = getU64(descriptor_ptr, 8 + 16 + 8);
+	const features = [];
+	for (let i = 0; i < feature_count; i++) {
+		const feature = getU32(feature_ptr, i * 4);
+		const feature_name = feature_enum_to_name(feature);
+		features.push(feature_name);
+	}
+
+	const limit_ptr = getU64(descriptor_ptr, 8 + 16 + 8 + 8); // ??
+	const defaultQueue_ptr = getU64(descriptor_ptr, 8 + 16 + 8 + 8 + 8); // ??
+	const deviceLostCallback_ptr = getU64(descriptor_ptr, 8 + 16 + 8 + 8 + 8 + 8); // ??
+	const uncapturedExceptions_ptr = getU64(descriptor_ptr, 8 + 16 + 8 + 8 + 8 + 8 + 8);
+
+	const uncapturedExceptionsCallback = getU64(uncapturedExceptions_ptr, 8);
+	const uncapturedExceptionsUserData1 = getU64(uncapturedExceptions_ptr, 16);
+	const uncapturedExceptionsUserData2 = getU64(uncapturedExceptions_ptr, 24);
+
+	const jsDescriptor = {
+		defaultQueue: { label: "<default-queue>" },
+		label: "<device-label>",
+		requiredFeatures: features,
+		requiredLimits: [],
+	};
+	switch(wasm_pause()) {
+		case 0: (async () => {
+			const device = await adapter.requestDevice(jsDescriptor);
+			
+			object_map_counter += 1;
+			object_map[object_map_counter] = device;
+
+			const device_idx = object_map_counter;
+			
+			device.addEventListener('uncapturederror', event => {
+				const userData1 = uncapturedExceptionsUserData1;
+				const userData2 = uncapturedExceptionsUserData2;
+
+				const string_ptr = jai_exports.context_alloc(
+					jai_context, event.error.message.length
+				);
+
+				jai_exports.jaiAdapterRequestDeviceErrorCallback(
+					jai_context,
+					device_idx,
+					string_ptr,
+					event.error.message.length,
+					uncapturedExceptionsCallback,
+					uncapturedExceptionsUserData1,
+					uncapturedExceptionsUserData2
+				);
+			});
+			setU64(returns_ptr, 0, object_map_counter);
+		})().then(wasm_resume); break;
+	}
+}
+
+jai_imports.jsDeviceGetQueue = (params_ptr, returns_ptr) => {
+	const device_idx = getU64(params_ptr, 0);
+	if (device_idx <= 0) {
+		return;
+	}
+
+	const device = object_map[device_idx];
+	if (!device) {
+		return;
+	}
+
+
+	object_map_counter += 1;
+	object_map[object_map_counter] = device.queue;
+
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsQueueRelease = (params_ptr, returns_ptr) => {
+	const queue_idx = getU64(params_ptr, 0);
+	if (queue_idx <= 0) {
+		return;
+	}
+
+	const queue = object_map[queue_idx];
+	if (!queue) {
+		return;
+	}
+
+	// Release the queue
+	object_map[queue_idx] = null;
+}
+
+jai_imports.jsQueueSubmit = (params_ptr, returns_ptr) => {
+	const queue_idx = getU64(params_ptr, 0);
+	const commandCount = getU64(params_ptr, 8);
+	const commands_ptr = getU64(params_ptr, 16);
+	if (queue_idx <= 0 || commandCount === 0 || commands_ptr === 0) {
+		return;
+	}
+
+	const queue = object_map[queue_idx];
+	if (!queue) {
+		return;
+	}
+
+	// Submit the commands to the queue
+	const commands = [];
+	for (let i = 0; i < commandCount; i++) {
+		const command_idx = getU64(commands_ptr, i * 8);
+		const command = object_map[command_idx];
+		if (!command) {
+			continue;
+		}
+		commands.push(command);
+	}
+
+	queue.submit(commands);
+}
+
+jai_imports.jsQueueWriteBuffer = (params_ptr, returns_ptr) => {
+	const queue_idx = getU64(params_ptr, 0);
+	const buffer_idx = getU64(params_ptr, 8);
+	const bufferOffset = getU64(params_ptr, 16);
+	const data_ptr = getU64(params_ptr, 24);
+	const dataSize = getU64(params_ptr, 32);
+
+	if (queue_idx <= 0 || buffer_idx <= 0 || data_ptr === 0 || dataSize === 0) {
+		return;
+	}
+
+	const queue = object_map[queue_idx];
+	const buffer = object_map[buffer_idx];
+
+	if (!queue || !buffer) {
+		return;
+	}
+
+	queue.writeBuffer(
+		buffer,
+		bufferOffset,
+		new DataView(jai_exports.memory.buffer, Number(data_ptr), Number(dataSize))
+	);
+}
+
+const TEXTURE_ASPECT_MAP = {
+	1: "all",
+	2: "depth-only",
+	3: "stencil-only",
+};
+
+jai_imports.jsQueueWriteTexture = (params_ptr, returns_ptr) => {
+	const queue_idx = getU64(params_ptr, 0);
+	const info_ptr = getU64(params_ptr, 8);
+	const data_ptr = getU64(params_ptr, 16);
+	const dataSize = getU64(params_ptr, 24);
+	const dataLayout_ptr = getU64(params_ptr, 32);
+	const writeSize_ptr = getU64(params_ptr, 40);
+
+	if (queue_idx === 0 || info_ptr === 0 || data_ptr === 0 || dataSize === 0 || dataLayout_ptr === 0 || writeSize_ptr === 0) {
+		return;
+	}
+
+	const queue = object_map[queue_idx];
+	if (!queue) {
+		return;
+	}
+
+	const texture_idx = getU64(info_ptr, 0);
+	const mipLevel = getU32(info_ptr, 8);
+	const originX = getU32(info_ptr, 12);
+	const originY = getU32(info_ptr, 16);
+	const originZ = getU32(info_ptr, 20);
+	const aspect = TEXTURE_ASPECT_MAP[getU32(info_ptr, 24)];
+
+	const texture = object_map[texture_idx];
+	if (!texture) {
+		return;
+	}
+
+	const layout_offset = getU32(dataLayout_ptr, 0);
+	const bytesPerRow = getU32(dataLayout_ptr, 4);
+	const rowsPerImage = getU32(dataLayout_ptr, 8);
+
+	const width = getU32(writeSize_ptr, 0);
+	const height = getU32(writeSize_ptr, 4);
+	const depth = getU32(writeSize_ptr, 8);
+
+	queue.writeTexture(
+		{
+			aspect: aspect,
+			mipLevel: mipLevel,
+			origin: [originX, originY, originZ],
+			texture: texture
+		},
+		new DataView(jai_exports.memory.buffer, Number(data_ptr), Number(dataSize)),
+		{
+			offset: layout_offset,
+			bytesPerRow: bytesPerRow,
+			rowsPerImage: rowsPerImage
+		},
+		[width, height, depth]
+	);
+}
+
+jai_imports.jsDeviceCreateCommandEncoder = (params_ptr, returns_ptr) => {
+	const device_idx = getU64(params_ptr, 0);
+	if (device_idx <= 0) {
+		return;
+	}
+	const descriptor_ptr = getU64(params_ptr, 8);
+	const label_ptr = getU64(descriptor_ptr, 8);
+
+	const device = object_map[device_idx];
+	if (!device) {
+		return;
+	}
+
+	const label = getString(label_ptr);
+
+	object_map_counter += 1;
+	object_map[object_map_counter] = device.createCommandEncoder({
+		label: label
+	});
+
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsCommandEncoderFinish = (params_ptr, returns_ptr) => {
+	const encoder_idx = getU64(params_ptr, 0);
+	const descriptor_ptr = getU64(params_ptr, 8);
+
+	if (encoder_idx <= 0 || descriptor_ptr === 0) {
+		return;
+	}
+
+	const encoder = object_map[encoder_idx];
+	if (!encoder) {
+		return;
+	}
+
+	const label_ptr = getU64(descriptor_ptr, 8);
+	const label = getString(label_ptr);
+
+	object_map_counter += 1;
+	object_map[object_map_counter] = encoder.finish(label);
+
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsCommandEncoderInsertDebugMarker = (params_ptr, returns_ptr) => {
+	const encoder_idx = getU64(params_ptr, 0);
+	const label_ptr = getU64(params_ptr, 8);
+
+	if (encoder_idx <= 0 || label_ptr === 0) {
+		return;
+	}
+
+	const encoder = object_map[encoder_idx];
+	if (!encoder) {
+		return;
+	}
+
+	const label = getString(label_ptr);
+
+	encoder.insertDebugMarker(label);
+}
+
+jai_imports.jsCommandBufferRelease = (params_ptr, returns_ptr) => {
+	const commandBuffer_idx = getU64(params_ptr, 0);
+	if (commandBuffer_idx <= 0) {
+		return;
+	}
+
+	object_map[commandBuffer_idx] = null;
+}
+
+jai_imports.jsCommandEncoderRelease = (params_ptr, returns_ptr) => {
+	const encoder_idx = getU64(params_ptr, 0);
+	if (encoder_idx <= 0) {
+		return;
+	}
+
+	object_map[encoder_idx] = null;
+}
+
+jai_imports.jsDeviceCreateBuffer = (params_ptr, returns_ptr) => {
+	const device_idx = getU64(params_ptr, 0);
+	if (device_idx <= 0) {
+		return;
+	}
+
+	const descriptor_ptr = getU64(params_ptr, 8);
+	if (descriptor_ptr === 0) {
+		return;
+	}
+
+	const device = object_map[device_idx];
+	if (!device) {
+		return;
+	}
+
+	const label = getString(descriptor_ptr + 8);
+	const usage = getU64(descriptor_ptr + 16);
+	const size = getU64(descriptor_ptr + 24);
+	const mappedAtCreation = getU32(descriptor_ptr + 32);
+
+	object_map_counter += 1;
+	object_map[object_map_counter] = device.createBuffer({
+		label: label,
+		mappedAtCreation: mappedAtCreation > 0,
+		size: size,
+		usage: usage
+	});
+
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsBufferRelease = (params_ptr, returns_ptr) => {
+	const buffer_idx = getU64(params_ptr, 0);
+	if (buffer_idx <= 0) {
+		return;
+	}
+
+	object_map[buffer_idx] = null;
+}
+
+jai_imports.jsBufferGetMappedRange = (params_ptr, returns_ptr) => {
+	const buffer_idx = getU64(params_ptr, 0);
+	if (buffer_idx <= 0) {
+		return;
+	}
+
+	const buffer = object_map[buffer_idx];
+	if (!buffer) {
+		return;
+	}
+
+	const offset = getU64(params_ptr, 8);
+	const size = getU64(params_ptr, 16);
+
+	const mapped_range = buffer.getMappedRange(offset, size);
+	buffer_to_pointer_map[buffer_idx] = {
+		data: jai_exports.context_alloc(
+			jai_context, BigInt(mapped_range.byteLength)
+		),
+		size: mapped_range.byteLength,
+		jsBuffer: mapped_range
+	};
+
+	new Uint8Array(
+		jai_exports.memory.buffer,
+		buffer_to_pointer_map[buffer_idx].data,
+		mapped_range.byteLength
+	).set(new Uint8Array(mapped_range));
+
+	setU64(returns_ptr, 0, buffer_to_pointer_map[buffer_idx]);
+}
+
+jai_imports.jsBufferUnmap = (params_ptr, returns_ptr) => {
+	const buffer_idx = getU64(params_ptr, 0);
+	if (buffer_idx <= 0) {
+		return;
+	}
+
+	const buffer = object_map[buffer_idx];
+	if (!buffer) {
+		return;
+	}
+
+	const mapping = buffer_to_pointer_map[buffer_idx];
+	if (!mapping) {
+		return;
+	}
+
+	new Uint8Array(mapping.jsBuffer).set(
+		new Uint8Array(jai_exports.memory.buffer, mapping.data, mapping.size)
+	);
+	buffer.unmap();
+}
+
+jai_imports.jsInstanceCreateSurface = (params_ptr, returns_ptr) => {
+	const instance_idx = getU64(params_ptr, 0);
+	if (instance_idx === 0) {
+		return;
+	}
+
+	const instance = object_map[instance_idx];
+	if (!instance) {
+		return;
+	}
+
+	const surface = wasmInstanceCreateSurface(instance, descriptor);
+	setU64(returns_ptr, 0, surface);
+}
+
