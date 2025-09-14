@@ -139,7 +139,7 @@ let web_buffer = new Uint8Array(1024*1024*32);
 let web_buffer_cursor = 0;
 
 window.addEventListener("load", async () => {
-    websocket = new WebSocket("ws://localhost:5623/ws");
+    websocket = new WebSocket("wss://89.88.83.151:2356/ws");
     websocket.addEventListener("message", async event => {
         // Append event.data to web_buffer at web_buffer_cursor
         const blob = event.data;
