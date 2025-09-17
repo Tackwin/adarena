@@ -1348,13 +1348,13 @@ const textureFormatConvert = (format) => {
 		case WGPUTextureFormat_RG32Uint: return "";
 		case WGPUTextureFormat_RG32Sint: return "";
 		case WGPUTextureFormat_RGBA16Uint: return "";
-		case WGPUTextureFormat_RGBA16Sint: return "";
-		case WGPUTextureFormat_RGBA16Float: return "";
-		case WGPUTextureFormat_RGBA32Float: return "";
-		case WGPUTextureFormat_RGBA32Uint: return "";
-		case WGPUTextureFormat_RGBA32Sint: return "";
-		case WGPUTextureFormat_Stencil8: return "";
-		case WGPUTextureFormat_Depth16Unorm: return "";
+		case WGPUTextureFormat_RGBA16Sint: return "rgba16sint";
+		case WGPUTextureFormat_RGBA16Float: return "rgba16float";
+		case WGPUTextureFormat_RGBA32Float: return "rgba32float";
+		case WGPUTextureFormat_RGBA32Uint: return "rgba32uint";
+		case WGPUTextureFormat_RGBA32Sint: return "rgba32sint";
+		case WGPUTextureFormat_Stencil8: return "stencil8";
+		case WGPUTextureFormat_Depth16Unorm: return "depth16unorm";
 		case WGPUTextureFormat_Depth24Plus: return "";
 		case WGPUTextureFormat_Depth24PlusStencil8: return "";
 		case WGPUTextureFormat_Depth32Float: return "depth32float";
@@ -3249,7 +3249,7 @@ jai_imports.jsDeviceCreateSampler = (params_ptr, returns_ptr) => {
 	const mipmapFilter = convertFilterModeToJs(mipmapFilterRaw);
 	const compare = convertCompareFunctionToJs(compareRaw);
 
-	const jsDescriptor = {
+	let jsDescriptor = {
 		label,
 		addressModeU,
 		addressModeV,
@@ -3261,8 +3261,10 @@ jai_imports.jsDeviceCreateSampler = (params_ptr, returns_ptr) => {
 		lodMaxClamp,
 		maxAnisotropy
 	};
-	if (compare > 0) {
-		jsDescriptor.compare = compare;
+	if (compareRaw > 0) {
+		jsDescriptor = {
+			compare
+		};
 	}
 
 	object_map_counter += 1;
@@ -3270,7 +3272,7 @@ jai_imports.jsDeviceCreateSampler = (params_ptr, returns_ptr) => {
 	setU64(returns_ptr, 0, object_map_counter);
 }
 
-const jsSamplerRelease = (params_ptr, returns_ptr) => {
+jai_imports.jsSamplerRelease = (params_ptr, returns_ptr) => {
 	const sampler_idx = getU64(params_ptr, 0);
 	if (sampler_idx <= 0) {
 		return;
@@ -3278,6 +3280,80 @@ const jsSamplerRelease = (params_ptr, returns_ptr) => {
 
 	object_map[sampler_idx] = null;
 }
+
+jai_imports.jsDeviceCreatePipelineLayout = (params_ptr, returns_ptr) => {
+	const device_idx = getU64(params_ptr, 0);
+	if (device_idx <= 0) {
+		return;
+	}
+
+	const descriptor_ptr = getU64(params_ptr, 8);
+	if (descriptor_ptr == 0) {
+		return;
+	}
+
+	const device = object_map[device_idx];
+	if (!device) {
+		return;
+	}
+
+	const label = getString(descriptor_ptr + 8n);
+	const bindGroupLayoutCount = getU64(descriptor_ptr, 24);
+	const bindGroupLayouts_ptr = getU64(descriptor_ptr, 32);
+
+	const bindGroupLayouts = [];
+	let cursor = 0;
+	for (let i = 0; i < bindGroupLayoutCount; i++) {
+		const bgl_idx = getU64(bindGroupLayouts_ptr, cursor);
+		cursor += 8;
+
+		const bgl = object_map[bgl_idx];
+		if (!bgl) {
+			console.error("Invalid bind group layout in pipeline layout descriptor");
+			return;
+		}
+		bindGroupLayouts.push(bgl);
+	}
+
+	object_map_counter += 1;
+	object_map[object_map_counter] = device.createPipelineLayout({
+		label,
+		bindGroupLayouts
+	});
+	
+	setU64(returns_ptr, 0, object_map_counter);
+}
+
+jai_imports.jsPipelineLayoutRelease = (params_ptr, returns_ptr) => {
+	const layout_idx = getU64(params_ptr, 0);
+	if (layout_idx <= 0) {
+		return;
+	}
+
+	object_map[layout_idx] = null;
+}
+
+jai_imports.jsRenderPassEncoderSetViewport = (params_ptr, returns_ptr) => {
+	const pass_idx = getU64(params_ptr, 0);
+	const x = getF32(params_ptr, 8);
+	const y = getF32(params_ptr, 12);
+	const width = getF32(params_ptr, 16);
+	const height = getF32(params_ptr, 20);
+	const minDepth = getF32(params_ptr, 24);
+	const maxDepth = getF32(params_ptr, 28);
+
+	if (pass_idx <= 0) {
+		return;
+	}
+
+	const pass = object_map[pass_idx];
+	if (!pass) {
+		return;
+	}
+
+	pass.setViewport(x, y, width, height, minDepth, maxDepth);
+}
+
 
 
 
