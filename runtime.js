@@ -2289,17 +2289,17 @@ const getFragmentState = (ptr) => {
 		const writeMask = getU64(targets_ptr, cursor);
 		cursor += 8;
 
-		const blend = undefined;
+		let blend = undefined;
 		if (blendState_ptr != 0) {
 			const color = {
-				operation: getU32(blendState_ptr, 0),
-				srcFactor: getU32(blendState_ptr, 4),
-				dstFactor: getU32(blendState_ptr, 8),
+				operation: blendOperationConvert(getU32(blendState_ptr, 0)),
+				srcFactor: blendFactorConvert(getU32(blendState_ptr, 4)),
+				dstFactor: blendFactorConvert(getU32(blendState_ptr, 8)),
 			};
 			const alpha = {
-				operation: getU32(blendState_ptr, 12),
-				srcFactor: getU32(blendState_ptr, 16),
-				dstFactor: getU32(blendState_ptr, 20),
+				operation: blendOperationConvert(getU32(blendState_ptr, 12)),
+				srcFactor: blendFactorConvert(getU32(blendState_ptr, 16)),
+				dstFactor: blendFactorConvert(getU32(blendState_ptr, 20)),
 			};
 			blend = { color, alpha };
 		}
