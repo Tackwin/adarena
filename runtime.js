@@ -1414,36 +1414,30 @@ const textureFormatConvert = (format) => {
 }
 
 let device_used = null;
+let data_view = null;
 
 const getU64 = (ptr, offset) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	return view.getBigUint64(Number(ptr) + Number(offset), true);
+	return data_view.getBigUint64(Number(ptr) + Number(offset), true);
 }
 const getU32 = (ptr, offset) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	return view.getUint32(Number(ptr) + Number(offset), true);
+	return data_view.getUint32(Number(ptr) + Number(offset), true);
 }
 const getF64 = (ptr, offset) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	return view.getFloat64(Number(ptr) + Number(offset), true);
+	return data_view.getFloat64(Number(ptr) + Number(offset), true);
 }
 const getF32 = (ptr, offset) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	return view.getFloat32(Number(ptr) + Number(offset), true);
+	return data_view.getFloat32(Number(ptr) + Number(offset), true);
 }
 
 const setU8 = (ptr, offset, value) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	view.setUint8(Number(ptr) + Number(offset), Number(value));
+	data_view.setUint8(Number(ptr) + Number(offset), Number(value));
 }
 
 const setU32 = (ptr, offset, value) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	view.setUint32(Number(ptr) + Number(offset), Number(value), true);
+	data_view.setUint32(Number(ptr) + Number(offset), Number(value), true);
 }
 const setU64 = (ptr, offset, value) => {
-	const view = new DataView(jai_exports.memory.buffer);
-	view.setBigUint64(Number(ptr) + Number(offset), BigInt(value), true);
+	data_view.setBigUint64(Number(ptr) + Number(offset), BigInt(value), true);
 }
 
 const getString = (stringview_ptr) => {
@@ -1454,7 +1448,12 @@ const getString = (stringview_ptr) => {
 	);
 }
 
+jai_imports.js_memory_grew = () => {
+	data_view = new DataView(jai_exports.memory.buffer);
+}
+
 jai_imports.jsCreateInstance = (params_ptr, returns_ptr) => {
+	data_view = new DataView(jai_exports.memory.buffer);
 	object_map_counter += 1;
 	object_map[object_map_counter] = navigator.gpu;
 	setU64(returns_ptr, 0, object_map_counter);
