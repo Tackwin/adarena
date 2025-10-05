@@ -1433,6 +1433,9 @@ const getF64 = (ptr, offset) => {
 const getF32 = (ptr, offset) => {
 	return data_view.getFloat32(Number(ptr) + Number(offset), true);
 }
+const setF32 = (ptr, offset, value) => {
+	data_view.setFloat32(Number(ptr) + Number(offset), Number(value), true);
+}
 
 const setU8 = (ptr, offset, value) => {
 	data_view.setUint8(Number(ptr) + Number(offset), Number(value));
@@ -3420,6 +3423,7 @@ let key_buffer = [];
 
 let mouse_x = 0;
 let mouse_y = 0;
+let mouse_wheel_delta = 0;
 
 const mapKeyNameToKeyIndex = (e) => {
 	const lowered = e.toLowerCase();
@@ -3522,6 +3526,13 @@ document.addEventListener("mousemove", (e) => {
 	mouse_y = e.clientY - rect.top;
 });
 
+document.addEventListener("wheel", (e) => {
+	// Prevent scrolling the page
+	e.preventDefault();
+
+	mouse_wheel_delta -= e.deltaY;
+});
+
 jai_imports.jsGetKeyState = (key_map_ptr, key_map_count) => {
 	for (let i = 0; i < key_map_count; i++) {
 		const index = key_buffer[i] ? 1 : 0;
@@ -3532,6 +3543,11 @@ jai_imports.jsGetKeyState = (key_map_ptr, key_map_count) => {
 jai_imports.jsGetMousePointer = (x_ptr, y_ptr) => {
 	setU32(x_ptr, 0, mouse_x);
 	setU32(y_ptr, 0, mouse_y);
+}
+
+jai_imports.jsGetMouseWheelDelta = (delta_ptr) => {
+	setF32(delta_ptr, 0, mouse_wheel_delta);
+	mouse_wheel_delta = 0;
 }
 
 jai_imports.jsGetDimensions = (dim_ptr) => {
