@@ -3418,6 +3418,7 @@ const Key_F12 = 48;
 const Key_MouseLeft = 49;
 const Key_MouseRight = 50;
 const Key_MouseMiddle = 51;
+const Key_Tab = 52;
 
 let key_buffer = [];
 
@@ -3477,6 +3478,7 @@ const mapKeyNameToKeyIndex = (e) => {
 		case "f10": return Key_F10;
 		case "f11": return Key_F11;
 		case "f12": return Key_F12;
+		case "tab": return Key_Tab;
 		default: return -1;
 	}
 
@@ -3486,6 +3488,9 @@ document.addEventListener("keydown", (e) => {
 	const keyIndex = mapKeyNameToKeyIndex(e.key);
 	if (keyIndex !== -1) {
 		key_buffer[keyIndex] = true;
+		if (e.preventDefault) {
+			e.preventDefault();
+		}
 	}
 });
 
@@ -3493,6 +3498,9 @@ document.addEventListener("keyup", (e) => {
 	const keyIndex = mapKeyNameToKeyIndex(e.key);
 	if (keyIndex !== -1) {
 		key_buffer[keyIndex] = false;
+		if (e.preventDefault) {
+			e.preventDefault();
+		}
 	}
 });
 
@@ -3614,7 +3622,8 @@ jai_imports.js_play_audio = (params_ptr) => {
 	let loop = getU32(params_ptr, 28) != 0;
 	const kind = getS32(params_ptr, 32);
 	const fade_in = getS32(params_ptr, 36);
-	const sound_id_ptr = getU64(params_ptr, 40);
+	const exponent = getF32(params_ptr, 40);
+	const sound_id_ptr = getU64(params_ptr, 48);
 
 	const buffer = audio_id_to_buffer[id];
 	if (!buffer) {
@@ -3639,7 +3648,7 @@ jai_imports.js_play_audio = (params_ptr) => {
 		panner.distanceModel = 'exponential';
 		panner.refDistance = 1.0;
 		panner.maxDistance = 1000;
-		panner.rolloffFactor = 3.0;
+		panner.rolloffFactor = exponent;
 		panner.setPosition(x, y, z);
 		
 		source.connect(gainNode);
