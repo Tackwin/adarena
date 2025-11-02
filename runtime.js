@@ -3624,6 +3624,7 @@ jai_imports.js_play_audio = (params_ptr) => {
 	const fade_in = getS32(params_ptr, 36);
 	const exponent = getF32(params_ptr, 40);
 	const sound_id_ptr = getU64(params_ptr, 48);
+	const delay = getF32(params_ptr, 56);
 
 	const buffer = audio_id_to_buffer[id];
 	if (!buffer) {
@@ -3640,7 +3641,7 @@ jai_imports.js_play_audio = (params_ptr) => {
 	const gainNode = audio_context.createGain();
 	gainNode.gain.setValueAtTime(0, audio_context.currentTime);
 	gainNode.gain.linearRampToValueAtTime(0.2 * volume, audio_context.currentTime + fade_in / 1000);
-	
+
 	let panner = null;
 	if (kind == 0) {
 		panner = audio_context.createPanner();
@@ -3660,7 +3661,7 @@ jai_imports.js_play_audio = (params_ptr) => {
 		gainNode.connect(audio_context.destination);
 	}
 	
-	source.start(0);
+	source.start(delay / 1000);
 	
 	sound_id_counter += 1;
 	const sound_id = sound_id_counter;
