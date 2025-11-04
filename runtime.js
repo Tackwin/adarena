@@ -3640,7 +3640,11 @@ jai_imports.js_play_audio = (params_ptr) => {
 	
 	const gainNode = audio_context.createGain();
 	gainNode.gain.setValueAtTime(0, audio_context.currentTime);
-	gainNode.gain.linearRampToValueAtTime(0.2 * volume, audio_context.currentTime + fade_in / 1000);
+
+	let mult = 1.0;
+	if (kind == 0)
+		mult = 0.1;
+	gainNode.gain.linearRampToValueAtTime(mult * volume, audio_context.currentTime + fade_in / 1000);
 
 	let panner = null;
 	if (kind == 0) {
