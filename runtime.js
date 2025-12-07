@@ -132,36 +132,11 @@ const entry_point = () => {
     }
 };
 
-let pwa_manifest;
-let websocket;
 
-let web_buffer = new Uint8Array(1024*1024*32);
-let web_buffer_cursor = 0;
 let audio_context = null;
 
 window.addEventListener("load", async () => {
-    websocket = new WebSocket("wss://89.88.83.151:2356/ws");
-    websocket.addEventListener("message", async event => {
-        // Append event.data to web_buffer at web_buffer_cursor
-        const blob = event.data;
-        const buffer = await blob.arrayBuffer();
-        const data = new Uint8Array(buffer);
-        // const data = new Uint8Array(await event.data.arrayBuffer());
-        if (web_buffer_cursor + data.length > web_buffer.length) {
-            console.error("Web buffer overflow, dropping message");
-            return;
-        }
-
-        web_buffer.set(data, web_buffer_cursor);
-        web_buffer_cursor += data.length;
-    });
-
-    // We use the PWA manifest to store paths to cached assets in addition to metadata about the application
-    const response = await fetch(document.querySelector('link[rel="manifest"]').href);
-    pwa_manifest   = await response.json();
-    document.title = pwa_manifest.name;
-    
-    await initialize_wasm_module("main.wasm", pwa_manifest.initial_pages);
+    await initialize_wasm_module("IceEscape.wasm", 4 * 4096);
 	audio_context = new AudioContext();
     
     entry_point();
@@ -172,7 +147,7 @@ window.addEventListener("wasm_exit", (e) => {
         // Because a PWA is a long running interactive application, it isn't expected you will exit unless something
         // bad happens. Reloading the page makes games like Invaders restart when you lose which seems like reasonable
         // enough behaviour for most programs written in this style.    -nzizic, 27 June 2025
-        window.location.reload();
+        // window.location.reload();
     } else {
         // Remove any existing canvases so that the user can see the error code message
         document.querySelectorAll("canvas").forEach(canvas => canvas.remove());
@@ -241,18 +216,6 @@ jai_imports.js_set_working_directory = (path_count, path_data, path_is_constant)
     }
 };
 
-const copy_array_to_js = (count, data) => {
-    const u8 = new Uint8Array(jai_exports.memory.buffer)
-    const bytes = u8.subarray(Number(data), Number(data) + Number(count));
-    return bytes;
-}
-jai_imports.js_send_web_message = (data, length) => {
-    if (websocket.readyState != WebSocket.OPEN)
-        return;
-    const x = copy_array_to_js(length, data);
-    websocket.send(x);
-};
-
 
 
 /*
@@ -261,6 +224,65 @@ Module Runtime_Support platform layer inserted from C:/Users/Tackwin/Documents/C
 
 */
 
+let granule_size = 8;
+let bits_per_byte = 8;
+let bits_per_byte_log2 = 3;
+
+function assert(c, msg) { if (!c) throw new Error(msg); }
+class HeapVerifier {
+    constructor(maxbytes) {
+        this.maxwords = maxbytes / granule_size;
+        this.state = new Uint8Array(this.maxwords / bits_per_byte);
+        this.allocations = new Map;
+    }
+    acquire(offset, len) {
+        assert_aligned(offset, granule_size);
+        for (let i = 0; i < len; i += granule_size) {
+            let bit = (offset + i) / granule_size;
+            let byte = bit >> bits_per_byte_log2;
+            let mask = 1 << (bit & (bits_per_byte - 1));
+            assert((this.state[byte] & mask) == 0, "word in use");
+            this.state[byte] |= mask;
+        }
+        this.allocations.set(offset, len);
+    }
+    release(offset) {
+        assert(this.allocations.has(offset))
+        let len = this.allocations.get(offset);
+        this.allocations.delete(offset);
+        for (let i = 0; i < len; i += granule_size) {
+            let bit = (offset + i) / granule_size;
+            let byte = bit >> bits_per_byte_log2;
+            let mask = 1 << (bit & (bits_per_byte - 1));
+            this.state[byte] &= ~mask;
+        }
+    }
+}
+
+class LinearMemory {
+    constructor({initial = 256, maximum = 256}) {
+        this.memory = new WebAssembly.Memory({ initial, maximum, shared: true });
+        this.verifier = new HeapVerifier(maximum * 65536);
+    }
+    record_malloc(ptr, len) { this.verifier.acquire(ptr, len); }
+    record_free(ptr) { this.verifier.release(ptr); }
+    read_string(offset) {
+        let view = new Uint8Array(this.memory.buffer);
+        let bytes = []
+        for (let byte = view[offset]; byte; byte = view[++offset])
+            bytes.push(byte);
+        return String.fromCharCode(...bytes);
+    }
+    log(str)      { console.log(`wasm log: ${str}`) }
+    log_i(str, i) { console.log(`wasm log: ${str}: ${i}`) }
+    env() {
+        return {
+            memory: this.memory,
+            wasm_log: (off) => this.log(this.read_string(off)),
+            wasm_log_i: (off, i) => this.log_i(this.read_string(off), i)
+        }
+    }
+}
 // Runtime_Support does not schedule for the wasm application to be loaded. We do this so that 
 // See Toolchains/Web/Progressive_Web_App.jai (and PWA_JS_HEADER in particular) for example usage.
 // There currently isn't support for loading multiple wasm modules on a single page.
@@ -275,15 +297,17 @@ const initialize_wasm_module = async (module_path, initial_pages = 0) => {
             },
         }),
         
-        "memory": new WebAssembly.Memory({"initial": initial_pages}),
+        "memory": new LinearMemory({initial: initial_pages, maximum: initial_pages}),
         
         // TODO: look into this
         // __memory_base: 256, // from https://www.tutorialspoint.com/webassembly/webassembly_dynamic_linking.htm idk why
     };
     
-    
+    const wasm_file = await fetch(module_path);
+	const wasm_data = await wasm_file.arrayBuffer();
+
     // load the wasm module and extract what we want from it
-    const module = await WebAssembly.instantiateStreaming(fetch(module_path), imports);
+    const module = await WebAssembly.instantiate(wasm_data, imports);
     jai_exports  = module.instance.exports;
     jai_context  = jai_exports.__jai_runtime_init(0, 0n);
     // log_context_stack_trace("init");
@@ -729,6 +753,509 @@ jai_imports.js_get_token = () => {
 jai_imports.js_set_token = (token) => {
     sessionStorage.setItem("token", token);
 };
+
+
+//IO
+const Key_A = 0;
+const Key_B = 1;
+const Key_C = 2;
+const Key_D = 3;
+const Key_E = 4;
+const Key_F = 5;
+const Key_G = 6;
+const Key_H = 7;
+const Key_I = 8;
+const Key_J = 9;
+const Key_K = 10;
+const Key_L = 11;
+const Key_M = 12;
+const Key_N = 13;
+const Key_O = 14;
+const Key_P = 15;
+const Key_Q = 16;
+const Key_R = 17;
+const Key_S = 18;
+const Key_T = 19;
+const Key_U = 20;
+const Key_V = 21;
+const Key_W = 22;
+const Key_X = 23;
+const Key_Y = 24;
+const Key_Z = 25;
+const Key__0 = 26;
+const Key__1 = 27;
+const Key__2 = 28;
+const Key__3 = 29;
+const Key__4 = 30;
+const Key__5 = 31;
+const Key__6 = 32;
+const Key__7 = 33;
+const Key__8 = 34;
+const Key__9 = 35;
+const Key_Space = 36;
+const Key_F1 = 37;
+const Key_F2 = 38;
+const Key_F3 = 39;
+const Key_F4 = 40;
+const Key_F5 = 41;
+const Key_F6 = 42;
+const Key_F7 = 43;
+const Key_F8 = 44;
+const Key_F9 = 45;
+const Key_F10 = 46;
+const Key_F11 = 47;
+const Key_F12 = 48;
+const Key_MouseLeft = 49;
+const Key_MouseRight = 50;
+const Key_MouseMiddle = 51;
+const Key_Tab = 52;
+
+let key_buffer = [];
+
+let mouse_x = 0;
+let mouse_y = 0;
+let mouse_wheel_delta = 0;
+
+const mapKeyNameToKeyIndex = (e) => {
+	const lowered = e.toLowerCase();
+	switch (lowered) {
+		case "a": return Key_A;
+		case "b": return Key_B;
+		case "c": return Key_C;
+		case "d": return Key_D;
+		case "e": return Key_E;
+		case "f": return Key_F;
+		case "g": return Key_G;
+		case "h": return Key_H;
+		case "i": return Key_I;
+		case "j": return Key_J;
+		case "k": return Key_K;
+		case "l": return Key_L;
+		case "m": return Key_M;
+		case "n": return Key_N;
+		case "o": return Key_O;
+		case "p": return Key_P;
+		case "q": return Key_Q;
+		case "r": return Key_R;
+		case "s": return Key_S;
+		case "t": return Key_T;
+		case "u": return Key_U;
+		case "v": return Key_V;
+		case "w": return Key_W;
+		case "x": return Key_X;
+		case "y": return Key_Y;
+		case "z": return Key_Z;
+		case "0": return Key__0;
+		case "1": return Key__1;
+		case "2": return Key__2;
+		case "3": return Key__3;
+		case "4": return Key__4;
+		case "5": return Key__5;
+		case "6": return Key__6;
+		case "7": return Key__7;
+		case "8": return Key__8;
+		case "9": return Key__9;
+		case " ": return Key_Space;
+		case "f1": return Key_F1;
+		case "f2": return Key_F2;
+		case "f3": return Key_F3;
+		case "f4": return Key_F4;
+		case "f5": return Key_F5;
+		case "f6": return Key_F6;
+		case "f7": return Key_F7;
+		case "f8": return Key_F8;
+		case "f9": return Key_F9;
+		case "f10": return Key_F10;
+		case "f11": return Key_F11;
+		case "f12": return Key_F12;
+		case "tab": return Key_Tab;
+		default: return -1;
+	}
+
+};
+
+document.addEventListener("keydown", (e) => {
+	const keyIndex = mapKeyNameToKeyIndex(e.key);
+	if (keyIndex !== -1) {
+		key_buffer[keyIndex] = true;
+		if (e.preventDefault) {
+			e.preventDefault();
+		}
+	}
+});
+
+document.addEventListener("keyup", (e) => {
+	const keyIndex = mapKeyNameToKeyIndex(e.key);
+	if (keyIndex !== -1) {
+		key_buffer[keyIndex] = false;
+		if (e.preventDefault) {
+			e.preventDefault();
+		}
+	}
+});
+
+document.addEventListener("mousedown", (e) => {
+	if (e.button === 0) {
+		key_buffer[Key_MouseLeft] = true;
+	} else if (e.button === 1) {
+		key_buffer[Key_MouseMiddle] = true;
+	} else if (e.button === 2) {
+		key_buffer[Key_MouseRight] = true;
+	}
+});
+
+document.addEventListener("mouseup", (e) => {
+	if (e.button === 0) {
+		key_buffer[Key_MouseLeft] = false;
+	} else if (e.button === 1) {
+		key_buffer[Key_MouseMiddle] = false;
+	} else if (e.button === 2) {
+		key_buffer[Key_MouseRight] = false;
+	}
+});
+
+document.addEventListener("mousemove", (e) => {
+	const canvas = document.getElementById("webgpu-canvas");
+	if (!canvas) {
+		return;
+	}
+	const rect = canvas.getBoundingClientRect();
+	mouse_x = e.clientX - rect.left;
+	mouse_y = e.clientY - rect.top;
+});
+
+document.addEventListener("wheel", (e) => {
+	// Prevent scrolling the page
+	e.preventDefault();
+
+	mouse_wheel_delta -= e.deltaY;
+});
+
+jai_imports.jsGetKeyState = (key_map_ptr, key_map_count) => {
+	for (let i = 0; i < key_map_count; i++) {
+		const index = key_buffer[i] ? 1 : 0;
+		setU8(key_map_ptr, i, index);
+	}
+}
+
+jai_imports.jsGetMousePointer = (x_ptr, y_ptr) => {
+	setU32(x_ptr, 0, mouse_x);
+	setU32(y_ptr, 0, mouse_y);
+}
+
+jai_imports.jsGetMouseWheelDelta = (delta_ptr) => {
+	setF32(delta_ptr, 0, mouse_wheel_delta);
+	mouse_wheel_delta = 0;
+}
+
+jai_imports.jsGetDimensions = (dim_ptr) => {
+	const canvas = document.getElementById("webgpu-canvas");
+	if (!canvas) {
+		setU32(dim_ptr, 0, 0);
+		setU32(dim_ptr, 4, 0);
+		setU32(dim_ptr, 8, 0);
+		setU32(dim_ptr, 12, 0);
+		return;
+	}
+	setU32(dim_ptr, 0, canvas.x);
+	setU32(dim_ptr, 4, canvas.y);
+	setU32(dim_ptr, 8, canvas.width);
+	setU32(dim_ptr, 12, canvas.height);
+}
+
+let web_buffer = new Uint8Array(1024*1024*32);
+let web_buffer_cursor = 0;
+let websocket;
+jai_imports.jsConnectServer = (
+	protocol_ptr, protocol_len, address_ptr, address_len, port, success_ptr
+) => {
+	const address = new TextDecoder().decode(
+		new Uint8Array(jai_exports.memory.buffer, Number(address_ptr), Number(address_len))
+	);
+	const protocol = new TextDecoder().decode(
+		new Uint8Array(jai_exports.memory.buffer, Number(protocol_ptr), Number(protocol_len))
+	);
+
+	console.log(`Connecting to server at ${address}:${port}...`);
+	websocket = new WebSocket(`${protocol}://${address}:${port}/ws`);
+    websocket.addEventListener("message", async event => {
+        // Append event.data to web_buffer at web_buffer_cursor
+        const blob = event.data;
+        const buffer = await blob.arrayBuffer();
+        const data = new Uint8Array(buffer);
+        // const data = new Uint8Array(await event.data.arrayBuffer());
+        if (web_buffer_cursor + data.length > web_buffer.length) {
+            console.error("Web buffer overflow, dropping message");
+            return;
+        }
+
+        web_buffer.set(data, web_buffer_cursor);
+        web_buffer_cursor += data.length;
+    });
+}
+
+jai_imports.jsIsServerConnected = (connected_ptr) => {
+	let connected = 0;
+	if (websocket && websocket.readyState === WebSocket.OPEN) {
+		connected = 1;
+	}
+	setU32(connected_ptr, 0, connected);
+}
+
+const copy_array_to_js = (count, data) => {
+    const u8 = new Uint8Array(jai_exports.memory.buffer)
+    const bytes = u8.subarray(Number(data), Number(data) + Number(count));
+    return bytes;
+}
+jai_imports.js_send_web_message = (data, length) => {
+    if (websocket.readyState != WebSocket.OPEN)
+        return;
+    const x = copy_array_to_js(length, data);
+    websocket.send(x);
+};
+
+jai_imports.js_get_web_message_received = (data, count, recv_ptr) => {
+    const dest = new Uint8Array(jai_exports.memory.buffer, Number(data), Number(count));
+
+    dest.set(web_buffer);
+
+    // Interpret recv_ptr as a s64 pointer to jai_exports.memory
+    const view = new DataView(jai_exports.memory.buffer);
+    const recv_address = Number(recv_ptr);
+
+    view.setBigInt64(recv_address, BigInt(web_buffer_cursor), true);
+
+    web_buffer_cursor = 0;
+};
+
+jai_imports.js_get_token = () => {
+    if (sessionStorage.getItem("token")) {
+        return parseInt(sessionStorage.getItem("token"), 10);
+    }
+    return Math.random() * 1024 * 1024;
+}
+
+jai_imports.js_set_token = (token) => {
+    sessionStorage.setItem("token", token);
+};
+
+
+
+//SOUND
+let audio_id_to_buffer = {};
+let audio_id_counter = 0;
+
+let sound_id_to_sound = {};
+let sound_id_counter = 0;
+
+let sound_id_to_state = {};
+const SOUND_PLAYING = 1;
+const SOUND_STOPPED = 2;
+
+const blobToAudioBuffer = async (blob) => {
+	const buffer = await blob.arrayBuffer();
+	return await audio_context.decodeAudioData(buffer);
+}
+
+jai_imports.js_load_audio = (params_ptr) => {
+	const data = getU64(params_ptr, 0);
+	const size = getU64(params_ptr, 8);
+	const id_ptr = getU64(params_ptr, 16);
+	const compressed = getU64(params_ptr, 24) != 0;
+
+	switch (wasm_pause()) {
+		case 0: (async () => {
+			const array = new Uint8Array(jai_exports.memory.buffer, Number(data), Number(size));
+			const buffer = await blobToAudioBuffer(new Blob([array]));
+
+			audio_id_counter += 1;
+			const audio_id = audio_id_counter;
+			audio_id_to_buffer[audio_id] = buffer;
+
+			setU64(id_ptr, 0, audio_id);
+			return +1;
+		})().then(wasm_resume); break;
+	}
+}
+
+jai_imports.js_play_audio = (params_ptr) => {
+	const id = getU64(params_ptr, 0);
+	const x = getF32(params_ptr, 8);
+	const y = getF32(params_ptr, 12);
+	const z = getF32(params_ptr, 16);
+	const volume = getF32(params_ptr, 20);
+	const pitch = getF32(params_ptr, 24);
+	let loop = getU32(params_ptr, 28) != 0;
+	const kind = getS32(params_ptr, 32);
+	const fade_in = getS32(params_ptr, 36);
+	const exponent = getF32(params_ptr, 40);
+	const sound_id_ptr = getU64(params_ptr, 48);
+	const delay = getF32(params_ptr, 56);
+
+	const buffer = audio_id_to_buffer[id];
+	if (!buffer) {
+		console.error(`Audio buffer with id ${id} not found`);
+		setU64(sound_id_ptr, 0, 0);
+		return;
+	}
+
+	const source = audio_context.createBufferSource();
+	source.buffer = buffer;
+	source.loop = loop;
+	// source.playbackRate.value = pitch;
+	
+	const gainNode = audio_context.createGain();
+	gainNode.gain.setValueAtTime(0, audio_context.currentTime);
+
+	let mult = 1.0;
+	if (kind == 0)
+		mult = 0.2;
+	gainNode.gain.linearRampToValueAtTime(mult * volume, audio_context.currentTime + fade_in / 1000);
+
+	let panner = null;
+	if (kind == 0) {
+		panner = audio_context.createPanner();
+		panner.panningModel = 'equalpower';
+		panner.distanceModel = 'exponential';
+		panner.refDistance = 1.0;
+		panner.maxDistance = 1000;
+		panner.rolloffFactor = exponent;
+		panner.setPosition(x, y, z);
+		
+		source.connect(gainNode);
+		gainNode.connect(panner);
+		panner.connect(audio_context.destination);
+	} else {
+		// no spatialization
+		source.connect(gainNode);
+		gainNode.connect(audio_context.destination);
+	}
+	
+	source.start(delay / 1000);
+	
+	sound_id_counter += 1;
+	const sound_id = sound_id_counter;
+	sound_id_to_sound[sound_id] = {
+		source,
+		gainNode,
+		panner,
+		audio_id: id,
+	};
+	sound_id_to_state[sound_id] = SOUND_PLAYING;
+	
+	source.onended = () => {
+		delete sound_id_to_sound[sound_id];
+		sound_id_to_state[sound_id] = SOUND_STOPPED;
+	};
+
+	setU64(sound_id_ptr, 0, sound_id);
+}
+
+jai_imports.js_query_sound = (params_ptr) => {
+	const sound_idx = getU64(params_ptr, 0);
+	const audio_id_ptr = getU64(params_ptr, 8);
+	const x_ptr = getU64(params_ptr, 16);
+	const y_ptr = getU64(params_ptr, 24);
+	const z_ptr = getU64(params_ptr, 32);
+	const volume_ptr = getU64(params_ptr, 40);
+	const pitch_ptr = getU64(params_ptr, 48);
+	const playing_ptr = getU64(params_ptr, 56);
+	const looping_ptr = getU64(params_ptr, 64);
+
+	const sound = sound_id_to_sound[sound_idx];
+	if (!sound) {
+		setU64(audio_id_ptr, 0, 0);
+		setF32(x_ptr, 0, 0);
+		setF32(y_ptr, 0, 0);
+		setF32(z_ptr, 0, 0);
+		setF32(volume_ptr, 0, 0);
+		setF32(pitch_ptr, 0, 0);
+		setU32(playing_ptr, 0, 0);
+		setU32(looping_ptr, 0, 0);
+		return;
+	}
+
+	let source = sound.source;
+	let gainNode = sound.gainNode;
+	let panner = sound.panner;
+	const audio_id = sound.audio_id;
+
+	const pos = [0, 0, 0];
+	if (panner) {
+		pos[0] = panner.positionX.value;
+		pos[1] = panner.positionY.value;
+		pos[2] = panner.positionZ.value;
+	}
+	const volume = gainNode.gain.value;
+	const rate = source.playbackRate.value;
+	const playing = sound_id_to_state[sound_id] === SOUND_PLAYING ? 1 : 0;
+	const looping = source.loop ? 1 : 0;
+
+	setU64(audio_id_ptr, 0, audio_id);
+	setF32(x_ptr, 0, pos[0]);
+	setF32(y_ptr, 0, pos[1]);
+	setF32(z_ptr, 0, pos[2]);
+	setF32(volume_ptr, 0, volume);
+	setF32(pitch_ptr, 0, rate);
+	setU32(playing_ptr, 0, playing);
+	setU32(looping_ptr, 0, looping);
+}
+
+jai_imports.js_set_sound = (params_ptr) => {
+	const sound_idx = getU64(params_ptr, 0);
+	const x = getF32(params_ptr, 8);
+	const y = getF32(params_ptr, 12);
+	const z = getF32(params_ptr, 16);
+	const volume = getF32(params_ptr, 20);
+	const pitch = getF32(params_ptr, 24);
+	const playing = getU32(params_ptr, 28);
+	const looping = getU32(params_ptr, 32);
+
+	const sound = sound_id_to_sound[sound_idx];
+	if (!sound) {
+		return;
+	}
+
+	let source = sound.source;
+	let gainNode = sound.gainNode;
+	let panner = sound.panner;
+	
+	if (panner) {
+		panner.positionX.value = x;
+		panner.positionY.value = y;
+		panner.positionZ.value = z;
+	}
+	gainNode.gain.value = volume;
+	// source.playbackRate.value = pitch;
+
+	const is_sound_playing = sound_id_to_state[sound_idx] === SOUND_PLAYING;
+	if (playing) {
+		if (!is_sound_playing) {
+			source.start(0);
+			sound_id_to_state[sound_idx] = SOUND_PLAYING;
+		}
+	} else {
+		if (is_sound_playing) {
+			source.stop(0);
+			sound_id_to_state[sound_idx] = SOUND_STOPPED;
+		}
+	}
+	source.loop = looping != 0;
+
+}
+
+jai_imports.js_set_listener_info = (params_ptr) => {
+	const x = getF32(params_ptr, 0);
+	const y = getF32(params_ptr, 4);
+	const z = getF32(params_ptr, 8);
+	const forward_x = getF32(params_ptr, 12);
+	const forward_y = getF32(params_ptr, 16);
+	const forward_z = getF32(params_ptr, 20);
+
+	audio_context.listener.setPosition(x, y, z);
+	audio_context.listener.setOrientation(forward_x, forward_y, forward_z, 0, 0, 1);
+}
+
 
 
 
@@ -1286,32 +1813,81 @@ let device_used = null;
 let data_view = null;
 
 const getU64 = (ptr, offset) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
+	
 	return data_view.getBigUint64(Number(ptr) + Number(offset), true);
 }
 const getU32 = (ptr, offset) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
+
+
 	return data_view.getUint32(Number(ptr) + Number(offset), true);
 }
 const getS32 = (ptr, offset) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
+
 	return data_view.getInt32(Number(ptr) + Number(offset), true);
 }
 const getF64 = (ptr, offset) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	return data_view.getFloat64(Number(ptr) + Number(offset), true);
 }
 const getF32 = (ptr, offset) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	return data_view.getFloat32(Number(ptr) + Number(offset), true);
 }
 const setF32 = (ptr, offset, value) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	data_view.setFloat32(Number(ptr) + Number(offset), Number(value), true);
 }
 
 const setU8 = (ptr, offset, value) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	data_view.setUint8(Number(ptr) + Number(offset), Number(value));
 }
 
 const setU32 = (ptr, offset, value) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	data_view.setUint32(Number(ptr) + Number(offset), Number(value), true);
 }
 const setU64 = (ptr, offset, value) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
 	data_view.setBigUint64(Number(ptr) + Number(offset), BigInt(value), true);
 }
 
@@ -1358,38 +1934,38 @@ jai_imports.jsAdapterGetLimits = (params_ptr, returns_ptr) => {
 
 	const limits_ptr = getU64(params_ptr, 8);
 
-	setU32(limits_ptr, 8 + 0, adapter.limits.maxTextureDimension1D);
-	setU32(limits_ptr, 8 + 4, adapter.limits.maxTextureDimension2D);
-	setU32(limits_ptr, 8 + 8, adapter.limits.maxTextureDimension3D);
-	setU32(limits_ptr, 8 + 12, adapter.limits.maxTextureArrayLayers);
-	setU32(limits_ptr, 8 + 16, adapter.limits.maxBindGroups);
-	setU32(limits_ptr, 8 + 20, adapter.limits.maxBindGroupsPlusVertexBuffers);
-	setU32(limits_ptr, 8 + 24, adapter.limits.maxBindingsPerBindGroup);
-	setU32(limits_ptr, 8 + 28, adapter.limits.maxDynamicUniformBuffersPerPipelineLayout);
-	setU32(limits_ptr, 8 + 32, adapter.limits.maxDynamicStorageBuffersPerPipelineLayout);
-	setU32(limits_ptr, 8 + 36, adapter.limits.maxSampledTexturesPerShaderStage);
-	setU32(limits_ptr, 8 + 40, adapter.limits.maxSamplersPerShaderStage);
-	setU32(limits_ptr, 8 + 44, adapter.limits.maxStorageBuffersPerShaderStage);
-	setU32(limits_ptr, 8 + 48, adapter.limits.maxStorageTexturesPerShaderStage);
-	setU32(limits_ptr, 8 + 52, adapter.limits.maxUniformBuffersPerShaderStage);
-	setU32(limits_ptr, 8 + 56, adapter.limits.maxUniformBufferBindingSize);
-	setU32(limits_ptr, 8 + 60, adapter.limits.maxStorageBufferBindingSize);
-	setU32(limits_ptr, 8 + 64, adapter.limits.minUniformBufferOffsetAlignment);
-	setU32(limits_ptr, 8 + 68, adapter.limits.minStorageBufferOffsetAlignment);
-	setU32(limits_ptr, 8 + 72, adapter.limits.maxVertexBuffers);
-	setU32(limits_ptr, 8 + 76, adapter.limits.maxBufferSize);
-	setU32(limits_ptr, 8 + 80, adapter.limits.maxVertexAttributes);
-	setU32(limits_ptr, 8 + 84, adapter.limits.maxVertexBufferArrayStride);
-	setU32(limits_ptr, 8 + 88, adapter.limits.maxInterStageShaderVariables);
-	setU32(limits_ptr, 8 + 92, adapter.limits.maxColorAttachments);
-	setU32(limits_ptr, 8 + 96, adapter.limits.maxColorAttachmentBytesPerSample);
-	setU32(limits_ptr, 8 + 100, adapter.limits.maxComputeWorkgroupStorageSize);
-	setU32(limits_ptr, 8 + 104, adapter.limits.maxComputeInvocationsPerWorkgroup);
-	setU32(limits_ptr, 8 + 108, adapter.limits.maxComputeWorkgroupSizeX);
-	setU32(limits_ptr, 8 + 112, adapter.limits.maxComputeWorkgroupSizeY);
-	setU32(limits_ptr, 8 + 116, adapter.limits.maxComputeWorkgroupSizeZ);
-	setU32(limits_ptr, 8 + 120, adapter.limits.maxComputeWorkgroupsPerDimension);
-
+	setU32(limits_ptr, 8 + 0, 0);
+	setU32(limits_ptr, 8 + 8, adapter.limits.maxTextureDimension1D);
+	setU32(limits_ptr, 8 + 12, adapter.limits.maxTextureDimension2D);
+	setU32(limits_ptr, 8 + 16, adapter.limits.maxTextureDimension3D);
+	setU32(limits_ptr, 8 + 20, adapter.limits.maxTextureArrayLayers);
+	setU32(limits_ptr, 8 + 24, adapter.limits.maxBindGroups);
+	setU32(limits_ptr, 8 + 28, adapter.limits.maxBindGroupsPlusVertexBuffers);
+	setU32(limits_ptr, 8 + 32, adapter.limits.maxBindingsPerBindGroup);
+	setU32(limits_ptr, 8 + 36, adapter.limits.maxDynamicUniformBuffersPerPipelineLayout);
+	setU32(limits_ptr, 8 + 40, adapter.limits.maxDynamicStorageBuffersPerPipelineLayout);
+	setU32(limits_ptr, 8 + 44, adapter.limits.maxSampledTexturesPerShaderStage);
+	setU32(limits_ptr, 8 + 48, adapter.limits.maxSamplersPerShaderStage);
+	setU32(limits_ptr, 8 + 52, adapter.limits.maxStorageBuffersPerShaderStage);
+	setU32(limits_ptr, 8 + 56, adapter.limits.maxStorageTexturesPerShaderStage);
+	setU32(limits_ptr, 8 + 60, adapter.limits.maxUniformBuffersPerShaderStage);
+	setU64(limits_ptr, 8 + 64, adapter.limits.maxUniformBufferBindingSize);
+	setU64(limits_ptr, 8 + 72, adapter.limits.maxStorageBufferBindingSize);
+	setU32(limits_ptr, 8 + 80, adapter.limits.minUniformBufferOffsetAlignment);
+	setU32(limits_ptr, 8 + 84, adapter.limits.minStorageBufferOffsetAlignment);
+	setU32(limits_ptr, 8 + 88, adapter.limits.maxVertexBuffers);
+	setU64(limits_ptr, 8 + 96, adapter.limits.maxBufferSize);
+	setU32(limits_ptr, 8 + 104, adapter.limits.maxVertexAttributes);
+	setU32(limits_ptr, 8 + 108, adapter.limits.maxVertexBufferArrayStride);
+	setU32(limits_ptr, 8 + 112, adapter.limits.maxInterStageShaderVariables);
+	setU32(limits_ptr, 8 + 116, adapter.limits.maxColorAttachments);
+	setU32(limits_ptr, 8 + 120, adapter.limits.maxColorAttachmentBytesPerSample);
+	setU32(limits_ptr, 8 + 124, adapter.limits.maxComputeWorkgroupStorageSize);
+	setU32(limits_ptr, 8 + 128, adapter.limits.maxComputeInvocationsPerWorkgroup);
+	setU32(limits_ptr, 8 + 132, adapter.limits.maxComputeWorkgroupSizeX);
+	setU32(limits_ptr, 8 + 136, adapter.limits.maxComputeWorkgroupSizeY);
+	setU32(limits_ptr, 8 + 140, adapter.limits.maxComputeWorkgroupSizeZ);
+	setU32(limits_ptr, 8 + 144, adapter.limits.maxComputeWorkgroupsPerDimension);
 	setU32(returns_ptr, 0, WGPUStatus_SUCCESS);
 }
 
@@ -1580,6 +2156,7 @@ jai_imports.jsAdapterRequestDevice = (params_ptr, returns_ptr) => {
 			const device_idx = object_map_counter;
 			
 			device.addEventListener('uncapturederror', event => {
+				console.error("WebGPU uncaptured error:", event.error);
 				const userData1 = uncapturedExceptionsUserData1;
 				const userData2 = uncapturedExceptionsUserData2;
 
@@ -3228,432 +3805,4 @@ jai_imports.jsRenderPassEncoderSetViewport = (params_ptr, returns_ptr) => {
 	pass.setViewport(x, y, width, height, minDepth, maxDepth);
 }
 
-
-
-
-
-//IO
-const Key_A = 0;
-const Key_B = 1;
-const Key_C = 2;
-const Key_D = 3;
-const Key_E = 4;
-const Key_F = 5;
-const Key_G = 6;
-const Key_H = 7;
-const Key_I = 8;
-const Key_J = 9;
-const Key_K = 10;
-const Key_L = 11;
-const Key_M = 12;
-const Key_N = 13;
-const Key_O = 14;
-const Key_P = 15;
-const Key_Q = 16;
-const Key_R = 17;
-const Key_S = 18;
-const Key_T = 19;
-const Key_U = 20;
-const Key_V = 21;
-const Key_W = 22;
-const Key_X = 23;
-const Key_Y = 24;
-const Key_Z = 25;
-const Key__0 = 26;
-const Key__1 = 27;
-const Key__2 = 28;
-const Key__3 = 29;
-const Key__4 = 30;
-const Key__5 = 31;
-const Key__6 = 32;
-const Key__7 = 33;
-const Key__8 = 34;
-const Key__9 = 35;
-const Key_Space = 36;
-const Key_F1 = 37;
-const Key_F2 = 38;
-const Key_F3 = 39;
-const Key_F4 = 40;
-const Key_F5 = 41;
-const Key_F6 = 42;
-const Key_F7 = 43;
-const Key_F8 = 44;
-const Key_F9 = 45;
-const Key_F10 = 46;
-const Key_F11 = 47;
-const Key_F12 = 48;
-const Key_MouseLeft = 49;
-const Key_MouseRight = 50;
-const Key_MouseMiddle = 51;
-const Key_Tab = 52;
-
-let key_buffer = [];
-
-let mouse_x = 0;
-let mouse_y = 0;
-let mouse_wheel_delta = 0;
-
-const mapKeyNameToKeyIndex = (e) => {
-	const lowered = e.toLowerCase();
-	switch (lowered) {
-		case "a": return Key_A;
-		case "b": return Key_B;
-		case "c": return Key_C;
-		case "d": return Key_D;
-		case "e": return Key_E;
-		case "f": return Key_F;
-		case "g": return Key_G;
-		case "h": return Key_H;
-		case "i": return Key_I;
-		case "j": return Key_J;
-		case "k": return Key_K;
-		case "l": return Key_L;
-		case "m": return Key_M;
-		case "n": return Key_N;
-		case "o": return Key_O;
-		case "p": return Key_P;
-		case "q": return Key_Q;
-		case "r": return Key_R;
-		case "s": return Key_S;
-		case "t": return Key_T;
-		case "u": return Key_U;
-		case "v": return Key_V;
-		case "w": return Key_W;
-		case "x": return Key_X;
-		case "y": return Key_Y;
-		case "z": return Key_Z;
-		case "0": return Key__0;
-		case "1": return Key__1;
-		case "2": return Key__2;
-		case "3": return Key__3;
-		case "4": return Key__4;
-		case "5": return Key__5;
-		case "6": return Key__6;
-		case "7": return Key__7;
-		case "8": return Key__8;
-		case "9": return Key__9;
-		case " ": return Key_Space;
-		case "f1": return Key_F1;
-		case "f2": return Key_F2;
-		case "f3": return Key_F3;
-		case "f4": return Key_F4;
-		case "f5": return Key_F5;
-		case "f6": return Key_F6;
-		case "f7": return Key_F7;
-		case "f8": return Key_F8;
-		case "f9": return Key_F9;
-		case "f10": return Key_F10;
-		case "f11": return Key_F11;
-		case "f12": return Key_F12;
-		case "tab": return Key_Tab;
-		default: return -1;
-	}
-
-};
-
-document.addEventListener("keydown", (e) => {
-	const keyIndex = mapKeyNameToKeyIndex(e.key);
-	if (keyIndex !== -1) {
-		key_buffer[keyIndex] = true;
-		if (e.preventDefault) {
-			e.preventDefault();
-		}
-	}
-});
-
-document.addEventListener("keyup", (e) => {
-	const keyIndex = mapKeyNameToKeyIndex(e.key);
-	if (keyIndex !== -1) {
-		key_buffer[keyIndex] = false;
-		if (e.preventDefault) {
-			e.preventDefault();
-		}
-	}
-});
-
-document.addEventListener("mousedown", (e) => {
-	if (e.button === 0) {
-		key_buffer[Key_MouseLeft] = true;
-	} else if (e.button === 1) {
-		key_buffer[Key_MouseMiddle] = true;
-	} else if (e.button === 2) {
-		key_buffer[Key_MouseRight] = true;
-	}
-});
-
-document.addEventListener("mouseup", (e) => {
-	if (e.button === 0) {
-		key_buffer[Key_MouseLeft] = false;
-	} else if (e.button === 1) {
-		key_buffer[Key_MouseMiddle] = false;
-	} else if (e.button === 2) {
-		key_buffer[Key_MouseRight] = false;
-	}
-});
-
-document.addEventListener("mousemove", (e) => {
-	const canvas = document.getElementById("webgpu-canvas");
-	if (!canvas) {
-		return;
-	}
-	const rect = canvas.getBoundingClientRect();
-	mouse_x = e.clientX - rect.left;
-	mouse_y = e.clientY - rect.top;
-});
-
-document.addEventListener("wheel", (e) => {
-	// Prevent scrolling the page
-	e.preventDefault();
-
-	mouse_wheel_delta -= e.deltaY;
-});
-
-jai_imports.jsGetKeyState = (key_map_ptr, key_map_count) => {
-	for (let i = 0; i < key_map_count; i++) {
-		const index = key_buffer[i] ? 1 : 0;
-		setU8(key_map_ptr, i, index);
-	}
-}
-
-jai_imports.jsGetMousePointer = (x_ptr, y_ptr) => {
-	setU32(x_ptr, 0, mouse_x);
-	setU32(y_ptr, 0, mouse_y);
-}
-
-jai_imports.jsGetMouseWheelDelta = (delta_ptr) => {
-	setF32(delta_ptr, 0, mouse_wheel_delta);
-	mouse_wheel_delta = 0;
-}
-
-jai_imports.jsGetDimensions = (dim_ptr) => {
-	const canvas = document.getElementById("webgpu-canvas");
-	if (!canvas) {
-		setU32(dim_ptr, 0, 0);
-		setU32(dim_ptr, 4, 0);
-		setU32(dim_ptr, 8, 0);
-		setU32(dim_ptr, 12, 0);
-		return;
-	}
-	setU32(dim_ptr, 0, canvas.x);
-	setU32(dim_ptr, 4, canvas.y);
-	setU32(dim_ptr, 8, canvas.width);
-	setU32(dim_ptr, 12, canvas.height);
-}
-
-
-
-//SOUND
-let audio_id_to_buffer = {};
-let audio_id_counter = 0;
-
-let sound_id_to_sound = {};
-let sound_id_counter = 0;
-
-let sound_id_to_state = {};
-const SOUND_PLAYING = 1;
-const SOUND_STOPPED = 2;
-
-const blobToAudioBuffer = async (blob) => {
-	const buffer = await blob.arrayBuffer();
-	return await audio_context.decodeAudioData(buffer);
-}
-
-jai_imports.js_load_audio = (params_ptr) => {
-	const data = getU64(params_ptr, 0);
-	const size = getU64(params_ptr, 8);
-	const id_ptr = getU64(params_ptr, 16);
-	const compressed = getU64(params_ptr, 24) != 0;
-
-	switch (wasm_pause()) {
-		case 0: (async () => {
-			const array = new Uint8Array(jai_exports.memory.buffer, Number(data), Number(size));
-			const buffer = await blobToAudioBuffer(new Blob([array]));
-
-			audio_id_counter += 1;
-			const audio_id = audio_id_counter;
-			audio_id_to_buffer[audio_id] = buffer;
-
-			setU64(id_ptr, 0, audio_id);
-			return +1;
-		})().then(wasm_resume); break;
-	}
-}
-
-jai_imports.js_play_audio = (params_ptr) => {
-	const id = getU64(params_ptr, 0);
-	const x = getF32(params_ptr, 8);
-	const y = getF32(params_ptr, 12);
-	const z = getF32(params_ptr, 16);
-	const volume = getF32(params_ptr, 20);
-	const pitch = getF32(params_ptr, 24);
-	let loop = getU32(params_ptr, 28) != 0;
-	const kind = getS32(params_ptr, 32);
-	const fade_in = getS32(params_ptr, 36);
-	const exponent = getF32(params_ptr, 40);
-	const sound_id_ptr = getU64(params_ptr, 48);
-	const delay = getF32(params_ptr, 56);
-
-	const buffer = audio_id_to_buffer[id];
-	if (!buffer) {
-		console.error(`Audio buffer with id ${id} not found`);
-		setU64(sound_id_ptr, 0, 0);
-		return;
-	}
-
-	const source = audio_context.createBufferSource();
-	source.buffer = buffer;
-	source.loop = loop;
-	// source.playbackRate.value = pitch;
-	
-	const gainNode = audio_context.createGain();
-	gainNode.gain.setValueAtTime(0, audio_context.currentTime);
-
-	let mult = 1.0;
-	if (kind == 0)
-		mult = 0.2;
-	gainNode.gain.linearRampToValueAtTime(mult * volume, audio_context.currentTime + fade_in / 1000);
-
-	let panner = null;
-	if (kind == 0) {
-		panner = audio_context.createPanner();
-		panner.panningModel = 'equalpower';
-		panner.distanceModel = 'exponential';
-		panner.refDistance = 1.0;
-		panner.maxDistance = 1000;
-		panner.rolloffFactor = exponent;
-		panner.setPosition(x, y, z);
-		
-		source.connect(gainNode);
-		gainNode.connect(panner);
-		panner.connect(audio_context.destination);
-	} else {
-		// no spatialization
-		source.connect(gainNode);
-		gainNode.connect(audio_context.destination);
-	}
-	
-	source.start(delay / 1000);
-	
-	sound_id_counter += 1;
-	const sound_id = sound_id_counter;
-	sound_id_to_sound[sound_id] = {
-		source,
-		gainNode,
-		panner,
-		audio_id: id,
-	};
-	sound_id_to_state[sound_id] = SOUND_PLAYING;
-	
-	source.onended = () => {
-		delete sound_id_to_sound[sound_id];
-		sound_id_to_state[sound_id] = SOUND_STOPPED;
-	};
-
-	setU64(sound_id_ptr, 0, sound_id);
-}
-
-jai_imports.js_query_sound = (params_ptr) => {
-	const sound_idx = getU64(params_ptr, 0);
-	const audio_id_ptr = getU64(params_ptr, 8);
-	const x_ptr = getU64(params_ptr, 16);
-	const y_ptr = getU64(params_ptr, 24);
-	const z_ptr = getU64(params_ptr, 32);
-	const volume_ptr = getU64(params_ptr, 40);
-	const pitch_ptr = getU64(params_ptr, 48);
-	const playing_ptr = getU64(params_ptr, 56);
-	const looping_ptr = getU64(params_ptr, 64);
-
-	const sound = sound_id_to_sound[sound_idx];
-	if (!sound) {
-		setU64(audio_id_ptr, 0, 0);
-		setF32(x_ptr, 0, 0);
-		setF32(y_ptr, 0, 0);
-		setF32(z_ptr, 0, 0);
-		setF32(volume_ptr, 0, 0);
-		setF32(pitch_ptr, 0, 0);
-		setU32(playing_ptr, 0, 0);
-		setU32(looping_ptr, 0, 0);
-		return;
-	}
-
-	let source = sound.source;
-	let gainNode = sound.gainNode;
-	let panner = sound.panner;
-	const audio_id = sound.audio_id;
-
-	const pos = [0, 0, 0];
-	if (panner) {
-		pos[0] = panner.positionX.value;
-		pos[1] = panner.positionY.value;
-		pos[2] = panner.positionZ.value;
-	}
-	const volume = gainNode.gain.value;
-	const rate = source.playbackRate.value;
-	const playing = sound_id_to_state[sound_id] === SOUND_PLAYING ? 1 : 0;
-	const looping = source.loop ? 1 : 0;
-
-	setU64(audio_id_ptr, 0, audio_id);
-	setF32(x_ptr, 0, pos[0]);
-	setF32(y_ptr, 0, pos[1]);
-	setF32(z_ptr, 0, pos[2]);
-	setF32(volume_ptr, 0, volume);
-	setF32(pitch_ptr, 0, rate);
-	setU32(playing_ptr, 0, playing);
-	setU32(looping_ptr, 0, looping);
-}
-
-jai_imports.js_set_sound = (params_ptr) => {
-	const sound_idx = getU64(params_ptr, 0);
-	const x = getF32(params_ptr, 8);
-	const y = getF32(params_ptr, 12);
-	const z = getF32(params_ptr, 16);
-	const volume = getF32(params_ptr, 20);
-	const pitch = getF32(params_ptr, 24);
-	const playing = getU32(params_ptr, 28);
-	const looping = getU32(params_ptr, 32);
-
-	const sound = sound_id_to_sound[sound_idx];
-	if (!sound) {
-		return;
-	}
-
-	let source = sound.source;
-	let gainNode = sound.gainNode;
-	let panner = sound.panner;
-	
-	if (panner) {
-		panner.positionX.value = x;
-		panner.positionY.value = y;
-		panner.positionZ.value = z;
-	}
-	gainNode.gain.value = volume;
-	// source.playbackRate.value = pitch;
-
-	const is_sound_playing = sound_id_to_state[sound_idx] === SOUND_PLAYING;
-	if (playing) {
-		if (!is_sound_playing) {
-			source.start(0);
-			sound_id_to_state[sound_idx] = SOUND_PLAYING;
-		}
-	} else {
-		if (is_sound_playing) {
-			source.stop(0);
-			sound_id_to_state[sound_idx] = SOUND_STOPPED;
-		}
-	}
-	source.loop = looping != 0;
-
-}
-
-jai_imports.js_set_listener_info = (params_ptr) => {
-	const x = getF32(params_ptr, 0);
-	const y = getF32(params_ptr, 4);
-	const z = getF32(params_ptr, 8);
-	const forward_x = getF32(params_ptr, 12);
-	const forward_y = getF32(params_ptr, 16);
-	const forward_z = getF32(params_ptr, 20);
-
-	audio_context.listener.setPosition(x, y, z);
-	audio_context.listener.setOrientation(forward_x, forward_y, forward_z, 0, 0, 1);
-}
 
