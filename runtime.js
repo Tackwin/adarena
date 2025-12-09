@@ -809,6 +809,7 @@ const Key_MouseLeft = 49;
 const Key_MouseRight = 50;
 const Key_MouseMiddle = 51;
 const Key_Tab = 52;
+const Key_Escape = 53;
 
 let key_buffer = [];
 
@@ -869,6 +870,7 @@ const mapKeyNameToKeyIndex = (e) => {
 		case "f11": return Key_F11;
 		case "f12": return Key_F12;
 		case "tab": return Key_Tab;
+		case "Escape": return Key_Escape;
 		default: return -1;
 	}
 
