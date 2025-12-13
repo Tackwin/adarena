@@ -810,6 +810,12 @@ const Key_MouseRight = 50;
 const Key_MouseMiddle = 51;
 const Key_Tab = 52;
 const Key_Escape = 53;
+const Key_LShift = 54;
+const Key_RShift = 55;
+const Key_Period = 56;
+const Key_Backspace = 57;
+const Key_Left = 58;
+const Key_Right = 59;
 
 let key_buffer = [];
 
@@ -870,7 +876,12 @@ const mapKeyNameToKeyIndex = (e) => {
 		case "f11": return Key_F11;
 		case "f12": return Key_F12;
 		case "tab": return Key_Tab;
-		case "Escape": return Key_Escape;
+		case "escape": return Key_Escape;
+		case "shift": return Key_LShift; // treat both shifts as left shift
+		case ".": return Key_Period;
+		case "backspace": return Key_Backspace;
+		case "arrowleft": return Key_Left;
+		case "arrowright": return Key_Right;
 		default: return -1;
 	}
 
