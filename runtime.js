@@ -951,6 +951,35 @@ jai_imports.jsGetKeyState = (key_map_ptr, key_map_count) => {
 	}
 }
 
+jai_imports.wasm_write_string = (s_count, s_data, to_standard_error) => {
+	try {
+		data_view.byteLength;
+	} catch {
+		data_view = new DataView(jai_exports.memory.buffer);
+	}
+
+	const text_decoder = new TextDecoder();
+	const u8 = new Uint8Array(data_view);
+	const bytes = u8.subarray(Number(s_data), Number(s_data) + Number(s_count));
+	const string = text_decoder.decode(bytes);
+	write_to_console_log(string, to_standard_error);
+};
+
+jai_imports.wasm_debug_break = () => {
+	debugger;
+};
+
+jai_imports.jsGetCurrentTimeMonotonic = (low_ptr, high_ptr) => {
+	const epoch = new Date("1969-07-20T20:17:40Z").getTime();
+	const now = performance.now() + performance.timeOrigin - epoch;
+	const fs = BigInt(Math.round(now)) * 1000n * 1000n * 1000n * 1000n;
+	const high = fs >> 64n;
+	const low = fs & ((1n << 64n) - 1n)
+
+	setU64(low_ptr, 0, low);
+	setU64(high_ptr, 0, high);
+}
+
 jai_imports.jsGetMousePointer = (x_ptr, y_ptr) => {
 	setU32(x_ptr, 0, mouse_x);
 	setU32(y_ptr, 0, mouse_y);
@@ -989,9 +1018,19 @@ jai_imports.jsConnectServer = (
 		new Uint8Array(jai_exports.memory.buffer, Number(protocol_ptr), Number(protocol_len))
 	);
 
-	console.log(`Connecting to server at ${address}:${port}...`);
-	websocket = new WebSocket(`${protocol}://${address}:${port}/ws`);
-    websocket.addEventListener("message", async event => {
+	const uri = `${protocol}://${address}:${port}/ws`;
+	console.log(`Connecting to server at ${uri}...`);
+	websocket = new WebSocket(uri);
+	websocket.onopen = () => {
+		console.log("Websocket server opened !");
+	}
+	websocket.onerror = (e) => {
+		console.error("Websocket error:", e);
+	}
+	websocket.onclose = (e) => {
+		console.log("Websocket close", e);
+	}
+	websocket.onmessage = async (event) => {
         // Append event.data to web_buffer at web_buffer_cursor
         const blob = event.data;
         const buffer = await blob.arrayBuffer();
@@ -1004,7 +1043,7 @@ jai_imports.jsConnectServer = (
 
         web_buffer.set(data, web_buffer_cursor);
         web_buffer_cursor += data.length;
-    });
+	}
 }
 
 jai_imports.jsIsServerConnected = (connected_ptr) => {
@@ -1027,10 +1066,14 @@ jai_imports.js_send_web_message = (data, length) => {
     websocket.send(x);
 };
 
+jai_imports.js_get_web_message_received_buffer_count = (count_ptr) => {
+	setU64(count_ptr, 0, web_buffer_cursor);
+};
+
 jai_imports.js_get_web_message_received = (data, count, recv_ptr) => {
     const dest = new Uint8Array(jai_exports.memory.buffer, Number(data), Number(count));
 
-    dest.set(web_buffer);
+    dest.set(web_buffer.subarray(0, Number(count)));
 
     // Interpret recv_ptr as a s64 pointer to jai_exports.memory
     const view = new DataView(jai_exports.memory.buffer);
